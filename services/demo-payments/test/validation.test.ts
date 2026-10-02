@@ -27,7 +27,12 @@ test('rejects non-integer amount_cents', () => {
   assert.deepEqual(result, { ok: false, message: 'amount_cents must be a positive integer' });
 });
 
-test('rejects non-positive amount_cents', () => {
+test('rejects zero amount_cents', () => {
   const result = validateChargeRequest({ order_id: '11111111-1111-1111-1111-111111111111', amount_cents: 0 });
+  assert.deepEqual(result, { ok: false, message: 'amount_cents must be a positive integer' });
+});
+
+test('rejects negative amount_cents', () => {
+  const result = validateChargeRequest({ order_id: '11111111-1111-1111-1111-111111111111', amount_cents: -1 });
   assert.deepEqual(result, { ok: false, message: 'amount_cents must be a positive integer' });
 });
