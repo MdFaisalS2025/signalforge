@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://signalforge.dev/schemas/incident.schema.json",
+  "title": "Incident",
+  "description": "One correlated operational problem, created by the Go correlation service once evidence thresholds are met.",
+  "type": "object",
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+    "incident_id": { "type": "string", "format": "uuid" },
+    "title": { "type": "string" },
+    "status": { "type": "string", "enum": ["open", "diagnosing", "awaiting_approval", "remediating", "resolved", "closed"] },
+    "severity": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
+    "started_at": { "type": "string", "format": "date-time", "description": "UTC timestamp of the first correlated signal" },
+    "detected_at": { "type": "string", "format": "date-time", "description": "UTC timestamp the incident record was created" },
+    "services": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1
+    },
+    "trigger_rule": { "type": "string", "description": "Identifier of the detection rule that created this incident" }
+  },
+  "required": [
+    "schema_version",
+    "incident_id",
+    "status",
+    "severity",
+    "started_at",
+    "detected_at",
+    "services",
+    "trigger_rule"
+  ],
+  "additionalProperties": false
+}

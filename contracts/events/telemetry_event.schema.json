@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://signalforge.dev/schemas/telemetry_event.schema.json",
+  "title": "TelemetryEvent",
+  "description": "Normalized log, metric, or trace signal emitted by a demo service and routed through the OpenTelemetry Collector.",
+  "type": "object",
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+    "event_id": { "type": "string", "format": "uuid" },
+    "timestamp": { "type": "string", "format": "date-time", "description": "UTC timestamp" },
+    "type": { "type": "string", "enum": ["log", "metric", "trace", "business_event"] },
+    "service": { "type": "string" },
+    "service_version": { "type": "string" },
+    "environment": { "type": "string" },
+    "deployment_id": { "type": "string" },
+    "trace_id": { "type": "string" },
+    "span_id": { "type": "string" },
+    "severity": { "type": "string", "enum": ["debug", "info", "warn", "error", "fatal"] },
+    "attributes": {
+      "type": "object",
+      "description": "Arbitrary structured attributes. Must not contain secrets, tokens, or raw credentials.",
+      "additionalProperties": true
+    }
+  },
+  "required": [
+    "schema_version",
+    "event_id",
+    "timestamp",
+    "type",
+    "service",
+    "trace_id"
+  ],
+  "additionalProperties": false
+}

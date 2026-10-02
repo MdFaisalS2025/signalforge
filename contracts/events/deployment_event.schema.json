@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://signalforge.dev/schemas/deployment_event.schema.json",
+  "title": "DeploymentEvent",
+  "description": "Records a version change to a demo service, used to correlate incidents with recent deployments.",
+  "type": "object",
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+    "deployment_id": { "type": "string", "format": "uuid" },
+    "timestamp": { "type": "string", "format": "date-time", "description": "UTC timestamp" },
+    "service": { "type": "string" },
+    "environment": { "type": "string" },
+    "previous_version": { "type": "string" },
+    "new_version": { "type": "string" },
+    "initiated_by": { "type": "string" },
+    "status": { "type": "string", "enum": ["started", "succeeded", "failed", "rolled_back"] }
+  },
+  "required": [
+    "schema_version",
+    "deployment_id",
+    "timestamp",
+    "service",
+    "new_version",
+    "status"
+  ],
+  "additionalProperties": false
+}

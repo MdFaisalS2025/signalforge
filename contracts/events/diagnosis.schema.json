@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://signalforge.dev/schemas/diagnosis.schema.json",
+  "title": "Diagnosis",
+  "description": "Versioned, typed output of the Python incident agent. Every supporting_claim must cite evidence_id values that exist in the evidence_items store; the citation validator rejects fabricated references.",
+  "type": "object",
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+    "diagnosis_id": { "type": "string", "format": "uuid" },
+    "incident_id": { "type": "string", "format": "uuid" },
+    "model_version": { "type": "string" },
+    "prompt_version": { "type": "string" },
+    "abstain": { "type": "boolean", "description": "True when evidence is insufficient or conflicting" },
+    "primary_hypothesis": { "type": "string" },
+    "supporting_claims": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "claim": { "type": "string" },
+          "evidence_ids": {
+            "type": "array",
+            "items": { "type": "string", "format": "uuid" },
+            "minItems": 1
+          }
+        },
+        "required": ["claim", "evidence_ids"],
+        "additionalProperties": false
+      }
+    },
+    "alternative_hypotheses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "hypothesis": { "type": "string" },
+          "disconfirming_evidence_ids": {
+            "type": "array",
+            "items": { "type": "string", "format": "uuid" }
+          }
+        },
+        "required": ["hypothesis"],
+        "additionalProperties": false
+      }
+    },
+    "confidence": {
+      "type": "object",
+      "properties": {
+        "value": { "type": "string", "enum": ["low", "medium", "high"] },
+        "explanation": { "type": "string" }
+      },
+      "required": ["value"],
+      "additionalProperties": false
+    },
+    "missing_evidence": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "What would materially improve the decision"
+    },
+    "created_at": { "type": "string", "format": "date-time", "description": "UTC timestamp" }
+  },
+  "required": [
+    "schema_version",
+    "diagnosis_id",
+    "incident_id",
+    "model_version",
+    "prompt_version",
+    "abstain",
+    "created_at"
+  ],
+  "additionalProperties": false
+}

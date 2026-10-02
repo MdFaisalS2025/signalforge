@@ -1,0 +1,46 @@
+# Environment
+.env
+.env.local
+*.env
+
+# Node / TypeScript
+node_modules/
+.next/
+dist/
+build/
+*.tsbuildinfo
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# Go
+bin/
+*.exe
+*.test
+
+# Docker
+*.pid
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs and local data
+*.log
+/data/
+/infra/docker/volumes/
+
+# Evaluation output (generated)
+/evals/reports/*
+!/evals/reports/.gitkeep
+
+# Pre-existing docx export artifacts: fully derivable from
+# SignalForge_Project_Plan.docx, kept on disk for local reference only.
+/SignalForge_Project_Plan_QA.pdf
+/signalforge_render/

@@ -1,0 +1,10 @@
+# Minimal Week 1 wiring. Scrape targets for SignalForge's own services
+# (consumer lag, workflow failures, agent latency, etc.) are added as those
+# services gain /metrics endpoints (see section 9.12 of the project plan).
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

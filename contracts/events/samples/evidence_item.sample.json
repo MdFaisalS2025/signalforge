@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0",
+  "evidence_id": "9c858901-8a57-4791-81fe-4c455b099bc9",
+  "incident_id": "a1b2c3d4-e5f6-4789-90ab-cdef01234567",
+  "source_type": "deployment",
+  "source_ref": "d3b07384-d9a0-4a3e-8f4c-1a2b3c4d5e6f",
+  "timestamp": "2026-10-01T11:55:00Z",
+  "service": "demo-payments",
+  "summary": "demo-payments deployed version 0.3.0 five seconds before the first failing span.",
+  "reliability": "high"
+}

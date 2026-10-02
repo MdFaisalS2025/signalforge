@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0",
+  "event_id": "8f14e45f-ceea-4d0b-8c4a-3c6f0f4e5b1a",
+  "timestamp": "2026-10-01T12:00:00Z",
+  "type": "trace",
+  "service": "demo-orders",
+  "service_version": "0.1.0",
+  "environment": "local",
+  "deployment_id": "d3b07384-d9a0-4a3e-8f4c-1a2b3c4d5e6f",
+  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "span_id": "00f067aa0ba902b7",
+  "severity": "info",
+  "attributes": {
+    "http.method": "POST",
+    "http.route": "/orders"
+  }
+}

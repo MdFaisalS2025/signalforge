@@ -1,0 +1,22 @@
+{
+  "schema_version": "1.0",
+  "diagnosis_id": "7b1e9f3a-2c4d-4e5f-8a9b-0c1d2e3f4a5b",
+  "incident_id": "a1b2c3d4-e5f6-4789-90ab-cdef01234567",
+  "model_version": "placeholder-0",
+  "prompt_version": "v1",
+  "abstain": false,
+  "primary_hypothesis": "The demo-payments 0.3.0 release introduced the 5xx regression.",
+  "supporting_claims": [
+    {
+      "claim": "First failing span occurs five seconds after the demo-payments deployment event.",
+      "evidence_ids": ["9c858901-8a57-4791-81fe-4c455b099bc9"]
+    }
+  ],
+  "alternative_hypotheses": [],
+  "confidence": {
+    "value": "high",
+    "explanation": "Deployment timestamp and first failure are tightly correlated."
+  },
+  "missing_evidence": [],
+  "created_at": "2026-10-01T12:00:20Z"
+}

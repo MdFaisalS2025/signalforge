@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://signalforge.dev/schemas/evidence_item.schema.json",
+  "title": "EvidenceItem",
+  "description": "An auditable, citable unit of support for a diagnostic claim. Every diagnosis claim must reference one or more evidence_id values that exist in this store.",
+  "type": "object",
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+    "evidence_id": { "type": "string", "format": "uuid" },
+    "incident_id": { "type": "string", "format": "uuid" },
+    "source_type": { "type": "string", "enum": ["log", "metric", "trace", "deployment", "runbook"] },
+    "source_ref": { "type": "string", "description": "Identifier or query reference back to the source record" },
+    "timestamp": { "type": "string", "format": "date-time", "description": "UTC timestamp" },
+    "service": { "type": "string" },
+    "summary": { "type": "string", "description": "Short human-readable excerpt or summary" },
+    "reliability": { "type": "string", "enum": ["low", "medium", "high"] }
+  },
+  "required": [
+    "schema_version",
+    "evidence_id",
+    "incident_id",
+    "source_type",
+    "source_ref",
+    "timestamp",
+    "summary"
+  ],
+  "additionalProperties": false
+}

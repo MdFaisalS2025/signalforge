@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0",
+  "incident_id": "a1b2c3d4-e5f6-4789-90ab-cdef01234567",
+  "title": "Elevated 5xx errors in demo-payments after deployment",
+  "status": "diagnosing",
+  "severity": "high",
+  "started_at": "2026-10-01T12:00:05Z",
+  "detected_at": "2026-10-01T12:00:12Z",
+  "services": ["demo-payments", "demo-orders"],
+  "trigger_rule": "deployment-correlated-error-spike"
+}
