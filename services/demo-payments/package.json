@@ -1,0 +1,13 @@
+{
+  "name": "demo-payments",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/main.js",
+    "dev": "tsx src/main.ts",
+    "test": "tsx --test test/**/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  }
+}
