@@ -2,6 +2,7 @@ import Fastify, { FastifyInstance } from 'fastify';
 import { validateChargeRequest } from './validation.js';
 import { recordHttpRequest } from './metrics.js';
 import { logEvent } from './logger.js';
+import type { FaultMode } from './config.js';
 
 const CHARGE_ROUTE = '/payments/charge';
 
@@ -13,7 +14,7 @@ function extractOrderId(body: unknown): string {
   return 'unknown';
 }
 
-export function buildServer(): FastifyInstance {
+export function buildServer(options: { faultMode: FaultMode } = { faultMode: 'disabled' }): FastifyInstance {
   const app = Fastify();
 
   app.get('/health', async () => ({ status: 'ok' }));
@@ -24,6 +25,12 @@ export function buildServer(): FastifyInstance {
       const durationSeconds = Number(process.hrtime.bigint() - start) / 1e9;
       recordHttpRequest(CHARGE_ROUTE, 'POST', statusCode, durationSeconds);
     };
+
+    if (options.faultMode === 'enabled') {
+      recordOutcome(500);
+      logEvent('error', 'charge failed', { order_id: extractOrderId(request.body), status_code: 500 });
+      return reply.code(500).send({ error: 'injected_fault' });
+    }
 
     const result = validateChargeRequest(request.body);
     if (!result.ok) {

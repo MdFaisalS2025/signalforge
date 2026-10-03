@@ -8,6 +8,7 @@ import { HttpInstrumentation } from '@opentelemetry/instrumentation-http';
 import { resourceFromAttributes } from '@opentelemetry/resources';
 import { ATTR_SERVICE_NAME } from '@opentelemetry/semantic-conventions';
 import { initMetrics, shutdownMetrics } from './metrics.js';
+import { loadConfig, resourceAttributes } from './config.js';
 
 const BATCH_SCHEDULED_DELAY_MILLIS = 1000;
 
@@ -28,7 +29,10 @@ const logsEndpoint = requireEnv('OTEL_EXPORTER_OTLP_LOGS_ENDPOINT');
 
 // One resource, attached identically to the trace, metric, and log providers
 // below, so every signal from this process reports the same service.name.
-const resource = resourceFromAttributes({ [ATTR_SERVICE_NAME]: serviceName });
+const resource = resourceFromAttributes({
+  [ATTR_SERVICE_NAME]: serviceName,
+  ...resourceAttributes(loadConfig(process.env)),
+});
 
 const tracerProvider = new NodeTracerProvider({
   resource,

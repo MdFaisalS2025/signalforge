@@ -16,8 +16,10 @@ async function start() {
 
   const { buildServer } = await import('./server.js');
   const { shutdownTelemetry } = await import('./instrument.js');
+  const { loadConfig } = await import('./config.js');
 
-  const app = buildServer();
+  const config = loadConfig(process.env);
+  const app = buildServer({ faultMode: config.faultMode });
 
   await app.listen({ port, host: '0.0.0.0' });
 
@@ -50,4 +52,7 @@ async function start() {
   process.on('SIGINT', () => { void shutdown('SIGINT'); });
 }
 
-start();
+start().catch((err: unknown) => {
+  console.error(err instanceof Error ? err.message : err);
+  process.exit(1);
+});

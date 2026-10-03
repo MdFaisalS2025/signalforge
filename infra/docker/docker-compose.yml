@@ -116,6 +116,10 @@ services:
     environment:
       PORT: "8082"
       OTEL_SERVICE_NAME: demo-payments
+      PAYMENTS_FAULT_MODE: ${PAYMENTS_FAULT_MODE:-disabled}
+      PAYMENTS_VERSION: ${PAYMENTS_VERSION:-0.1.0}
+      DEPLOYMENT_ENVIRONMENT: ${DEPLOYMENT_ENVIRONMENT:-local}
+      DEPLOYMENT_ID: ${DEPLOYMENT_ID:-}
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://otel-collector:4318/v1/traces
       OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: http://otel-collector:4318/v1/metrics
       OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: http://otel-collector:4318/v1/logs
