@@ -19,6 +19,21 @@ services:
       - "9092:9092"
     volumes:
       - redpanda-data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "info", "--brokers", "redpanda:9092"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  redpanda-init:
+    image: redpandadata/redpanda:v24.2.7
+    restart: "no"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    entrypoint: ["sh", "-c"]
+    command:
+      - 'for t in telemetry.raw.v1 deployments.v1 telemetry.dead-letter.v1 incidents.created.v1; do rpk topic describe "$$t" --brokers redpanda:9092 >/dev/null 2>&1 || rpk topic create "$$t" --partitions 1 --replicas 1 --brokers redpanda:9092; done'
 
   clickhouse:
     image: clickhouse/clickhouse-server:24.8
@@ -31,6 +46,11 @@ services:
       - "9000:9000"
     volumes:
       - clickhouse-data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
 
   temporal-postgresql:
     image: postgres:16
@@ -68,6 +88,9 @@ services:
     volumes:
       - ../../observability/otel-collector:/etc/otelcol-contrib
     command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    depends_on:
+      redpanda-init:
+        condition: service_completed_successfully
     ports:
       - "4317:4317"
       - "4318:4318"

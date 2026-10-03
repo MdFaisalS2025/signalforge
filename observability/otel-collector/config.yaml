@@ -1,5 +1,5 @@
-# Minimal Week 1 wiring. Enrichment, redaction, and routing rules land in Week 2
-# (see SignalForge_Project_Plan.docx, section 9.2).
+# Week 1 receivers, plus Week 3 export of every signal to Redpanda as OTLP JSON.
+# Enrichment and redaction are not configured here. Deployment attributes come from the services.
 receivers:
   otlp:
     protocols:
@@ -8,18 +8,40 @@ receivers:
       http:
         endpoint: 0.0.0.0:4318
 
+processors:
+  batch:
+    send_batch_size: 512
+    timeout: 1s
+
 exporters:
   debug:
     verbosity: detailed
+  kafka:
+    brokers: ["redpanda:9092"]
+    topic: telemetry.raw.v1
+    encoding: otlp_json
+    protocol_version: 2.0.0
+    sending_queue:
+      enabled: true
+      num_consumers: 10
+      queue_size: 1000
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 5s
+      max_elapsed_time: 60s
 
 service:
   pipelines:
     traces:
       receivers: [otlp]
-      exporters: [debug]
+      processors: [batch]
+      exporters: [debug, kafka]
     metrics:
       receivers: [otlp]
-      exporters: [debug]
+      processors: [batch]
+      exporters: [debug, kafka]
     logs:
       receivers: [otlp]
-      exporters: [debug]
+      processors: [batch]
+      exporters: [debug, kafka]
