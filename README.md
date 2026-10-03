@@ -4,10 +4,12 @@ AI incident response and observability platform: turns raw operational telemetry
 into evidence-linked incident diagnoses and safe, human-approved remediation
 workflows.
 
-**Status: Week 1 scaffold.** No services are implemented yet. This repository
-currently contains the monorepo skeleton, a Docker Compose base for local
-dependencies, event contracts, and architecture decision records, per the Week 1
-milestone in [`SignalForge_Project_Plan.docx`](SignalForge_Project_Plan.docx).
+**Status: Orders → Payments observability slice implemented.** Two demo services
+(`demo-orders`, `demo-payments`) run in Docker Compose and export traces, metrics,
+and logs over OTLP/HTTP to the OpenTelemetry Collector. The rest of the platform
+(incident correlation, the agent, the dashboard, and remediation) is still
+placeholder scaffolding. The overall plan is in
+[`SignalForge_Project_Plan.docx`](SignalForge_Project_Plan.docx).
 
 ## Problem and user workflow
 
@@ -82,28 +84,179 @@ docs/
 scripts/               # Setup, reset, replay, validation
 ```
 
-## Quick start (local dependencies only)
+## Prerequisites
 
-The services above are currently placeholder containers (`sleep infinity`) — this
-starts the wiring for Redpanda, ClickHouse, Temporal, the OpenTelemetry Collector,
-Prometheus, and Grafana, not a working product yet.
+- Docker with Compose v2 (`docker compose version`). Docker Desktop must be
+  running; `docker compose` cannot reach the engine otherwise.
+- Node.js 24 and npm, to build and test the services on the host.
+- Python 3 (`python`), for schema validation.
+
+## Quick start: Orders → Payments slice
+
+Start only the services this slice needs:
 
 ```bash
-cp .env.example .env
-docker compose -f infra/docker/docker-compose.yml up -d
+docker compose -f infra/docker/docker-compose.yml up -d demo-orders demo-payments otel-collector
 ```
 
-Validate the environment file is in place and sample events conform to their
-schemas:
+Wait until `demo-orders` and `demo-payments` report `healthy`:
 
 ```bash
-python3 scripts/validate-schemas.py
+docker compose -f infra/docker/docker-compose.yml ps
 ```
 
-Tear down:
+Stop the stack when you are done:
 
 ```bash
-docker compose -f infra/docker/docker-compose.yml down -v
+docker compose -f infra/docker/docker-compose.yml down
+```
+
+Running `docker compose ... up -d` without service names starts every service in the
+file. Redpanda, ClickHouse, Temporal, Prometheus, and Grafana are real images that
+the slice does not use. `collector-go`, `agent-python`, `remediation`, `api`, `web`,
+and `demo-inventory` are placeholder containers (`sleep infinity`).
+
+## Endpoints
+
+| Service | Host URL | Notes |
+|---|---|---|
+| `demo-orders` | `http://localhost:8081` | `POST /orders`, `GET /health` |
+| `demo-payments` | `http://localhost:8082` | `POST /payments/charge`, `GET /health` (called only by Orders) |
+| Temporal UI | `http://localhost:8084` | Host port moved from 8081 to avoid the Orders port. Not exercised by this slice. |
+| OTLP/HTTP receiver | `http://localhost:4318` | Collector; traces at `/v1/traces`, metrics at `/v1/metrics`, logs at `/v1/logs` |
+
+## Place an order
+
+Send a valid request with a UUID `order_id`:
+
+```bash
+curl -X POST http://localhost:8081/orders -H "Content-Type: application/json" -d '{"order_id":"11111111-2222-4333-8444-555555555555","item":"widget","amount_cents":500}'
+```
+
+PowerShell equivalent:
+
+```powershell
+$body = @{ order_id = '11111111-2222-4333-8444-555555555556'; item = 'widget'; amount_cents = 500 } | ConvertTo-Json
+Invoke-RestMethod -Method Post -Uri 'http://localhost:8081/orders' -ContentType 'application/json' -Body $body
+```
+
+On success the response is HTTP `201`:
+
+```json
+{"order_id":"11111111-2222-4333-8444-555555555555","status":"created","payment_status":"approved"}
+```
+
+Invalid input returns HTTP `400` with `{"error":"invalid_request","message":"..."}`
+(for example, a malformed `order_id` or a non-positive `amount_cents`).
+
+## Observability
+
+Both services export all three signals to the Collector over OTLP/HTTP:
+
+- **Traces:** one trace per order, containing the Orders inbound server span,
+  the Orders outbound client span to Payments, and the Payments inbound server span,
+  in that parent-child order.
+- **Metrics:** `http_requests_total` and `http_request_duration_seconds`, labelled
+  with `route`, `method`, and `status_code`. Order IDs and trace IDs are never metric labels.
+- **Logs:** structured JSON lines on stdout (`request received`,
+  `request completed`, `payment failed`), each carrying `order_id`, `trace_id`, and
+  `span_id`. The same records are also exported to the Collector as OTLP log records.
+
+The Collector's `debug` exporter prints everything it receives at `detailed` verbosity:
+
+```bash
+docker compose -f infra/docker/docker-compose.yml logs otel-collector
+```
+
+## Verify the slice
+
+Run the bootstrap-order check first. It builds nothing itself, so build
+`demo-orders` first. It starts its own disposable Payments stub and Orders process,
+so it does not need the Compose stack:
+
+```bash
+npm --prefix services/demo-orders run build
+node scripts/verify-bootstrap-order.mjs
+```
+
+It passes when a valid, non-zero `traceparent` reaches the Payments stub and the
+Orders stdout log line for the request carries a `trace_id` matching it.
+
+The full acceptance script needs the stack from the Quick start running (all three
+services healthy). It sends a successful order and checks the three-span trace,
+the OTLP logs from both services, and the `http_requests_total` metric from both.
+Then it runs the failure demonstration below:
+
+```bash
+node scripts/verify-orders-payments-slice.mjs
+```
+
+Each run uses fresh order IDs and only considers logs and Collector output
+written after the test starts, so repeated runs do not depend on earlier output.
+The script restarts `demo-payments` even if an assertion fails. On failure it prints
+the Orders, Payments, and Collector logs for the failing test's time window.
+
+## Failure demonstration (Payments unavailable)
+
+To see the failure path by hand:
+
+```bash
+docker compose -f infra/docker/docker-compose.yml stop demo-payments
+```
+
+Send an order with a new UUID `order_id` as shown above. Orders returns HTTP `502`:
+
+```json
+{"order_id":"<your-order-id>","status":"failed","reason":"payment_unavailable"}
+```
+
+In the trace for that request, the Orders server span has status `Error` with the
+message `payment unavailable`, and exactly one outbound attempt to Payments is recorded.
+The Orders logs contain a `payment failed` error record for the same trace.
+
+Restore the service and wait for it to become healthy:
+
+```bash
+docker compose -f infra/docker/docker-compose.yml start demo-payments
+docker compose -f infra/docker/docker-compose.yml ps
+```
+
+## Scope and limits
+
+This is a local demo of observability for one synchronous request path, not a
+production deployment. Specifically:
+
+- Orders calls Payments once per request. There are no retries, circuit breakers,
+  or timeouts beyond the 3-second client timeout (`PAYMENTS_TIMEOUT_MS`).
+- Payments always approves a valid charge. It has no failure branch, so the only
+  failure the demo produces is Payments being stopped.
+- There is no authentication, persistence, or message queue in this slice. Orders
+  and Payments hold no state.
+- Telemetry goes to a Collector that prints it. Nothing stores or queries traces,
+  metrics, or logs yet.
+- There is no production deployment, Kubernetes, or cloud configuration.
+
+## Validation
+
+Run the schema validator (no containers needed):
+
+```bash
+python scripts/validate-schemas.py
+```
+
+Validate the Compose file:
+
+```bash
+docker compose -f infra/docker/docker-compose.yml config --quiet
+```
+
+Run the unit tests and type checks for each service:
+
+```bash
+npm --prefix services/demo-orders test
+npm --prefix services/demo-orders run typecheck
+npm --prefix services/demo-payments test
+npm --prefix services/demo-payments run typecheck
 ```
 
 ## Event contracts
