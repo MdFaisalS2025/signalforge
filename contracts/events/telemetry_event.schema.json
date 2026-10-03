@@ -27,8 +27,17 @@
     "event_id",
     "timestamp",
     "type",
-    "service",
-    "trace_id"
+    "service"
+  ],
+  "allOf": [
+    {
+      "if": { "properties": { "type": { "enum": ["trace", "log"] } }, "required": ["type"] },
+      "then": { "required": ["trace_id"] }
+    },
+    {
+      "if": { "properties": { "type": { "const": "metric" } }, "required": ["type"] },
+      "then": { "not": { "required": ["trace_id"] } }
+    }
   ],
   "additionalProperties": false
 }

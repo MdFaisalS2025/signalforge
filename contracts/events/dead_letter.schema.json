@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://signalforge.dev/schemas/dead_letter.schema.json",
+  "title": "DeadLetter",
+  "description": "A message the normalizer could not map or validate, preserved with its source position so it can be inspected and replayed.",
+  "type": "object",
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+    "reason": { "type": "string", "minLength": 1 },
+    "source_topic": { "type": "string", "minLength": 1 },
+    "source_partition": { "type": "integer", "minimum": 0 },
+    "source_offset": { "type": "integer", "minimum": 0 },
+    "received_at": { "type": "string", "format": "date-time", "description": "UTC timestamp" },
+    "raw_payload": { "type": "string", "description": "Original message value as a string" }
+  },
+  "required": [
+    "schema_version",
+    "reason",
+    "source_topic",
+    "source_partition",
+    "source_offset",
+    "received_at",
+    "raw_payload"
+  ],
+  "additionalProperties": false
+}

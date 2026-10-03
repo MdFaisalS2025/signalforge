@@ -1,0 +1,18 @@
+{
+  "schema_version": "1.0",
+  "event_id": "3f6a1c2e-9b8d-4e7f-a0b1-c2d3e4f50617",
+  "timestamp": "2026-10-03T12:00:00.000000000Z",
+  "type": "metric",
+  "service": "demo-payments",
+  "service_version": "0.2.0-faulty",
+  "environment": "local",
+  "deployment_id": "d3b07384-d9a0-4a3e-8f4c-1a2b3c4d5e6f",
+  "severity": "info",
+  "attributes": {
+    "metric.name": "http_requests_total",
+    "metric.kind": "sum",
+    "metric.value": 3,
+    "route": "/payments/charge",
+    "status_code": 500
+  }
+}

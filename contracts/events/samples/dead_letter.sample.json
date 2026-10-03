@@ -1,0 +1,9 @@
+{
+  "schema_version": "1.0",
+  "reason": "invalid JSON payload",
+  "source_topic": "telemetry.raw.v1",
+  "source_partition": 0,
+  "source_offset": 7,
+  "received_at": "2026-10-03T12:00:00.000000000Z",
+  "raw_payload": "{not json"
+}
