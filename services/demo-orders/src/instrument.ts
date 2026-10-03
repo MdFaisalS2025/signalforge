@@ -1,3 +1,5 @@
+import { IncomingMessage } from 'node:http';
+import { SpanStatusCode } from '@opentelemetry/api';
 import { NodeTracerProvider, BatchSpanProcessor } from '@opentelemetry/sdk-trace-node';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
 import { LoggerProvider, BatchLogRecordProcessor } from '@opentelemetry/sdk-logs';
@@ -63,6 +65,20 @@ const unregisterInstrumentations = registerInstrumentations({
     new HttpInstrumentation({
       ignoreIncomingRequestHook: (req) => req.url === '/health',
       ignoreOutgoingRequestHook: (req) => req.path === '/health',
+      // HTTP instrumentation overwrites a span's status on response completion
+      // with a code-only status, so the payment-unavailable message must be
+      // applied here, after that overwrite, and only to the inbound POST /orders
+      // response that returns 502.
+      applyCustomAttributesOnSpan: (span, request, response) => {
+        if (
+          request instanceof IncomingMessage &&
+          request.method === 'POST' &&
+          request.url === '/orders' &&
+          response.statusCode === 502
+        ) {
+          span.setStatus({ code: SpanStatusCode.ERROR, message: 'payment unavailable' });
+        }
+      },
     }),
   ],
 });
