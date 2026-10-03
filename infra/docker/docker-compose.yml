@@ -59,7 +59,7 @@ services:
       TEMPORAL_ADDRESS: temporal:7233
       TEMPORAL_CORS_ORIGINS: http://localhost:3000
     ports:
-      - "8081:8080"
+      - "8084:8080"
     depends_on:
       - temporal
 
@@ -89,16 +89,45 @@ services:
       - grafana-data:/var/lib/grafana
 
   # ---------------------------------------------------------------------
-  # SignalForge services (Week 1 scope: empty placeholder containers;
-  # real implementations land in later weeks per the MVP delivery plan)
+  # SignalForge services
   # ---------------------------------------------------------------------
   demo-orders:
-    image: alpine:3.20
-    command: ["sleep", "infinity"]
+    build: ../../services/demo-orders
+    environment:
+      PORT: "8081"
+      OTEL_SERVICE_NAME: demo-orders
+      PAYMENTS_URL: http://demo-payments:8082
+      PAYMENTS_TIMEOUT_MS: "3000"
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://otel-collector:4318/v1/traces
+      OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: http://otel-collector:4318/v1/metrics
+      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: http://otel-collector:4318/v1/logs
+    ports:
+      - "8081:8081"
+    depends_on:
+      - otel-collector
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8081/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
 
   demo-payments:
-    image: alpine:3.20
-    command: ["sleep", "infinity"]
+    build: ../../services/demo-payments
+    environment:
+      PORT: "8082"
+      OTEL_SERVICE_NAME: demo-payments
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://otel-collector:4318/v1/traces
+      OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: http://otel-collector:4318/v1/metrics
+      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: http://otel-collector:4318/v1/logs
+    ports:
+      - "8082:8082"
+    depends_on:
+      - otel-collector
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8082/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
 
   demo-inventory:
     image: alpine:3.20
