@@ -148,12 +148,12 @@ Created files are marked **new**; changed files are marked **change**.
 | `services/collector-go/.dockerignore` | new | 4 | Excludes `bin/`, `*.md`, and tests from the build context. |
 | `services/collector-go/cmd/collector-go/main.go` | new (stub in 4), change (9) | 4, 9 | Process entry: config, migrations, three loops. |
 | `services/collector-go/internal/config/config.go`, `config_test.go` | new | 4, 9 | Environment loading with exact errors, including test hooks (9). |
-| `services/collector-go/internal/store/store.go` | new | 5 | `Store` interface and row types (section 7.2). |
+| `services/collector-go/internal/store/store.go` | new | 5 | `Store` interface and row types (section 7.2). Task 6 adds `InsertEvents`, `InsertDeployments`, `SucceededDeployments`. |
 | `services/collector-go/internal/store/migrate.go`, `migrate_test.go` | new | 5 | Idempotent migration runner. |
 | `services/collector-go/internal/store/migrations/0001_correlation_schema.sql` | new | 5 | ClickHouse tables (revisioned `incidents`). |
-| `services/collector-go/internal/store/clickhouse.go` | new | 5 | `Store` implementation over clickhouse-go. |
-| `services/collector-go/internal/store/fake_test.go` | new | 5 | `ReplacingMergeTree`-semantics fake shared by correlator and publisher tests. |
-| `services/collector-go/internal/store/clickhouse_integration_test.go` | new | 5 | Integration test, skipped unless `CLICKHOUSE_HOST` is set. |
+| `services/collector-go/internal/store/clickhouse.go` | new | 5 | `Store` implementation over clickhouse-go. Task 6 adds canonical writes and `SucceededDeployments`. |
+| `services/collector-go/internal/store/fake_test.go` | new | 5 | `ReplacingMergeTree`-semantics fake shared by correlator and publisher tests. Task 6 adds canonical writes and seeding helpers. |
+| `services/collector-go/internal/store/clickhouse_integration_test.go` | new | 5 | Integration test, skipped unless `CLICKHOUSE_HOST` is set. Task 6 adds canonical insert/read assertions. |
 | `services/collector-go/internal/canonical/otlp.go` | new | 6 | OTLP JSON structs. |
 | `services/collector-go/internal/canonical/mapping.go`, `mapping_test.go` | new | 6 | Canonical mapping, validation, log attribute preservation. |
 | `services/collector-go/internal/canonical/identity.go`, `identity_test.go` | new | 6 | UUIDv5 identity. |
@@ -260,10 +260,10 @@ const Namespace = "8f3c2a9e-5d1b-4f6a-b7c8-2e9d0a1b3c4d"
 // internal/store
 type Store interface {
     MigrateUp(ctx context.Context) error
-    InsertEvents(ctx context.Context, events []canonical.Event) error
-    InsertDeployments(ctx context.Context, deployments []canonical.Deployment) error
+    InsertEvents(ctx context.Context, events []canonical.Event) error               // added in Task 6, after internal/canonical exists
+    InsertDeployments(ctx context.Context, deployments []canonical.Deployment) error // added in Task 6
     FailureTraces(ctx context.Context, since time.Time) ([]FailureRow, error)
-    SucceededDeployments(ctx context.Context, since time.Time) ([]canonical.Deployment, error)
+    SucceededDeployments(ctx context.Context, since time.Time) ([]canonical.Deployment, error) // added in Task 6
     IncidentsByKey(ctx context.Context, dedupKey string) ([]IncidentRow, error)   // latest revision per incident_id
     InsertIncidentWithEvidence(ctx context.Context, inc IncidentRow, ev []EvidenceRow) error // inc.Revision == 1, state pending
     InsertEvidence(ctx context.Context, ev []EvidenceRow) error                  // idempotent by evidence_id
@@ -1046,14 +1046,16 @@ inserts are harmless.
 reproduces `ReplacingMergeTree` semantics. For `incidents` it keeps all revisions and returns the one
 with the highest `revision` per `incident_id`; for `evidence_items` it keeps one row per
 `evidence_id`; for `telemetry_events` one row per `event_id`. It has failure-injection fields
-(`failRead`, `failWrite`) and counts of rows written. Its own test:
+(`failRead`, `failWrite`) and counts of rows written. `MarkIncidentPublished` takes the original
+revision-1 pending row and itself creates revision 2 (revision + 1, state `published`, non-null
+`published_at`); the caller never sets `Revision` or `PublicationState` on the row it passes. Its own test:
 
 ```go
 func TestFakeIncidentRevisionsReplace(t *testing.T) {
     f := NewFake()
     inc := IncidentRow{IncidentID: "I", DedupKey: "k", Revision: 1, PublicationState: "pending", PublishedAt: nil}
     _ = f.InsertIncidentWithEvidence(ctx, inc, nil)
-    inc.Revision = 2; inc.PublicationState = "published"
+    // inc is still the original pending revision 1; MarkIncidentPublished writes revision 2 itself.
     _ = f.MarkIncidentPublished(ctx, inc, time.Unix(100, 0).UTC())
     rows, _ := f.IncidentsByKey(ctx, "k")
     if len(rows) != 1 || rows[0].Revision != 2 || rows[0].PublicationState != "published" || rows[0].PublishedAt == nil { t.Fatalf("%+v", rows) }
@@ -1085,12 +1087,15 @@ git commit -m "feat(collector-go): add idempotent ClickHouse schema and revision
 
 ### Task 6 — Canonical mapping, identities, and dead-letter reasons
 
-**Depends on:** Task 4. **Spec:** 7.4, 7.5, 8.1, 8.3, 13.1 item 3.
+**Depends on:** Tasks 4, 5. **Spec:** 7.4, 7.5, 8.1, 8.3, 13.1 item 3.
 
 **Files (new):** `internal/canonical/otlp.go`, `mapping.go`, `mapping_test.go`, `identity.go`,
 `identity_test.go`, `deadletter.go`, `testdata/traces.json`, `testdata/logs.json`,
 `testdata/metrics.json`, `testdata/deployment.json`, `testdata/trace_missing_trace_id.json`,
 `testdata/log_missing_trace_id.json`, `testdata/traces_no_service.json`.
+
+**Files (modified, after the canonical package exists):** `internal/store/store.go`,
+`internal/store/clickhouse.go`, `internal/store/fake_test.go`, `internal/store/clickhouse_integration_test.go`.
 
 **RED.** Write `identity_test.go` first:
 
@@ -1182,13 +1187,88 @@ Expected RED: `undefined: MapTelemetryMessage`.
 - Log attributes: every attribute on the record is copied unchanged (including `order_id`), plus
   `log.body`.
 
+**Store methods (after `internal/canonical` exists).** Task 5 committed a `Store` without the three
+methods below, because they use `canonical` types that did not exist yet. This task adds them to
+`store.go` with these signatures:
+
+```go
+// internal/store/store.go (imports internal/canonical; canonical never imports store)
+InsertEvents(ctx context.Context, events []canonical.Event) error                   // idempotent by event_id
+InsertDeployments(ctx context.Context, deployments []canonical.Deployment) error    // idempotent by deployment_id
+SucceededDeployments(ctx context.Context, since time.Time) ([]canonical.Deployment, error)
+```
+
+Helpers added to the fake for Tasks 7 and 8: `EventsWritten() int`, `DeploymentsWritten() int`, and
+`SeedFailureTraces([]FailureRow)`. The failure-injection method keeps the Task 5 name, `FailWrite(bool)`.
+
+**RED, fake tests** (`fake_test.go`, written first; expected to fail with `f.InsertEvents undefined`):
+
+```go
+func TestFakeEventsDedupeByEventID(t *testing.T) {
+    ctx := context.Background()
+    f := NewFake()
+    ev := canonical.Event{EventID: "e1", SchemaVersion: "1.0", Timestamp: t0, Type: "trace", Service: "demo-payments", Severity: "info", Attributes: map[string]any{}}
+    _ = f.InsertEvents(ctx, []canonical.Event{ev, ev})
+    _ = f.InsertEvents(ctx, []canonical.Event{ev})
+    if f.EventsWritten() != 1 { t.Fatalf("%d events, want 1", f.EventsWritten()) }
+}
+func TestSucceededDeploymentsFilter(t *testing.T) {
+    ctx := context.Background()
+    f := NewFake()
+    since := t0
+    _ = f.InsertDeployments(ctx, []canonical.Deployment{
+        {DeploymentID: "late-ok", Timestamp: since.Add(5 * time.Second), Service: "demo-payments", Status: "succeeded"},
+        {DeploymentID: "ok", Timestamp: since.Add(1 * time.Second), Service: "demo-payments", Status: "succeeded"},
+        {DeploymentID: "before", Timestamp: since.Add(-time.Second), Service: "demo-payments", Status: "succeeded"},
+        {DeploymentID: "failed", Timestamp: since.Add(2 * time.Second), Service: "demo-payments", Status: "failed"},
+        {DeploymentID: "other", Timestamp: since.Add(3 * time.Second), Service: "demo-orders", Status: "succeeded"},
+    })
+    got, _ := f.SucceededDeployments(ctx, since)
+    if len(got) != 2 || got[0].DeploymentID != "ok" || got[1].DeploymentID != "late-ok" { t.Fatalf("%+v", got) }
+    if f.DeploymentsWritten() != 5 { t.Fatalf("%d deployments written", f.DeploymentsWritten()) }
+}
+func TestFakeWriteFailureRejectsCanonicalWrites(t *testing.T) {
+    ctx := context.Background()
+    f := NewFake()
+    f.FailWrite(true)
+    if err := f.InsertEvents(ctx, []canonical.Event{{EventID: "e2"}}); err == nil { t.Fatal("expected error") }
+    if err := f.InsertDeployments(ctx, []canonical.Deployment{{DeploymentID: "d2"}}); err == nil { t.Fatal("expected error") }
+    if f.EventsWritten() != 0 || f.DeploymentsWritten() != 0 { t.Fatal("rows written despite failure") }
+}
+```
+
+Command: `node scripts/go-in-docker.mjs go test ./internal/store/... -run 'TestFakeEventsDedupeByEventID|TestSucceededDeploymentsFilter|TestFakeWriteFailureRejectsCanonicalWrites'`.
+
+**GREEN, fake.** The fake gains `events map[string]canonical.Event` keyed by `EventID`, which replaces
+the Task 5 `telemetry` map and `PutTelemetry`, and `deployments map[string]canonical.Deployment` keyed
+by `DeploymentID`. Writes replace by key, which is the `ReplacingMergeTree` equivalent: a repeated
+deterministic ID keeps one row. `SucceededDeployments` keeps `service = 'demo-payments'`,
+`status = 'succeeded'`, and `Timestamp >= since`, sorted by `Timestamp`. `FailureTraces` returns the
+rows seeded with `SeedFailureTraces` whose `Timestamp >= since`, sorted by `Timestamp`.
+
+**ClickHouse** (`clickhouse.go`), using `PrepareBatch` and explicit column lists:
+- `InsertEvents`: columns `event_id, schema_version, timestamp, ingested_at, type, service,
+  service_version, environment, deployment_id, trace_id, span_id, severity, attributes`. `attributes`
+  is the `encoding/json` encoding of `Attributes` (`{}` when nil). `ingested_at` is the write time in
+  UTC. An empty slice returns nil without starting a batch.
+- `InsertDeployments`: columns `deployment_id, timestamp, service, environment, new_version,
+  previous_version, initiated_by, status, ingested_at`.
+- `SucceededDeployments`: the section 9 statement, with `FINAL`, `ORDER BY timestamp`, scanned into
+  `canonical.Deployment`.
+
+**Integration** (`clickhouse_integration_test.go`): still skipped unless `CLICKHOUSE_HOST` is set. Add
+`TestClickHouseCanonicalEventAndSucceededDeployment`. It inserts one canonical event through
+`InsertEvents`, reads it back with `FINAL`, and asserts the nanosecond timestamp and the attributes. It
+inserts one succeeded deployment through `InsertDeployments` and asserts that `SucceededDeployments`
+returns it. The live run happens in Task 9.
+
 **Staged files:**
 
 ```
-git add services/collector-go/internal/canonical
+git add services/collector-go/internal/canonical services/collector-go/internal/store/store.go services/collector-go/internal/store/clickhouse.go services/collector-go/internal/store/fake_test.go services/collector-go/internal/store/clickhouse_integration_test.go
 git diff --cached --check
 git diff --cached --stat
-git commit -m "feat(collector-go): map OTLP JSON to canonical events with UUIDv5 identities"
+git commit -m "feat(collector-go): map OTLP JSON to canonical events and add canonical store writes"
 ```
 
 ---
@@ -1261,7 +1341,7 @@ func TestInvalidRecordGoesToDeadLetterWithExactReason(t *testing.T) {
 }
 func TestWriteFailureDoesNotCommit(t *testing.T) {
     f := newFakes()
-    f.store.FailWrites(true)
+    f.store.FailWrite(true)
     n := &Normalizer{Consumer: f.consumer, Producer: f.producer, Store: f.store, Now: fixedNow, Backoff: instantBackoff(3)}
     if err := n.ProcessBatch(ctx, []Record{validTraceRecord(11)}); err == nil { t.Fatal("expected failure after give-up") }
     if len(f.consumer.Committed()) != 0 { t.Fatal("offset committed despite failed write") }
@@ -1998,7 +2078,8 @@ git commit -m "docs: document faulty-deployment incident correlation and record 
   script, and documentation and final validation.
 - **Interfaces:** `IncidentRow` (with `Revision`, `PublicationState`, `PublishedAt`), the `Store`
   methods (`PendingIncidents`, `MarkIncidentPublished`, `EvidenceCount`, `InsertEvidence`,
-  `InsertIncidentWithEvidence`, `LatestEvaluatedUntil`), `Correlator` (no producer), `Publisher`
+  `InsertIncidentWithEvidence`, `LatestEvaluatedUntil`; Task 6 adds `InsertEvents`, `InsertDeployments`,
+  `SucceededDeployments`), `Correlator` (no producer), `Publisher`
   (with test hooks), and the config test-hook names are defined once (section 7) and used unchanged
   in Tasks 5, 8, 9, and 11.
 - **Test ownership:** each behavior has an owning test. Publication recovery (failed produce, failed
