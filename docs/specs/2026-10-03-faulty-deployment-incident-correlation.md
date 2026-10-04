@@ -449,8 +449,8 @@ Column definitions:
   `status LowCardinality(String)`, `severity LowCardinality(String)`,
   `started_at DateTime64(9, 'UTC')`, `detected_at DateTime64(9, 'UTC')`,
   `services Array(String)`, `publication_state LowCardinality(String)` (`pending` or
-  `published`), `published_at DateTime64(9, 'UTC')` (the zero time `1970-01-01 00:00:00`
-  while pending).
+  `published`), `published_at Nullable(DateTime64(9, 'UTC'))` (`NULL` while pending; a non-null
+  UTC timestamp once published).
 - `evidence_items`: `evidence_id UUID`, `incident_id UUID`,
   `source_type LowCardinality(String)`, `source_ref String`,
   `timestamp DateTime64(9, 'UTC')`, `service LowCardinality(String)`, `summary String`,
@@ -461,8 +461,8 @@ Column definitions:
 **Revision pattern.** The `incidents` table is written only by inserts. Creating an
 incident inserts revision 1 with `publication_state = 'pending'`. Marking it published
 inserts a new row with the same `incident_id` and fields, `revision` one higher,
-`publication_state = 'published'`, and `published_at` set; `detected_at` is copied
-unchanged. `ReplacingMergeTree(revision)` keeps the highest revision per `incident_id`.
+`publication_state = 'published'`, and `published_at` set to a non-null UTC timestamp;
+`detected_at` is copied unchanged. A pending revision always has `published_at = NULL`. `ReplacingMergeTree(revision)` keeps the highest revision per `incident_id`.
 Reads that need the current state use `FINAL`. Evidence rows keep the same pattern with
 `ingested_at` as their version column, and their IDs are deterministic (section 12.2), so
 repeated inserts are harmless.
@@ -556,7 +556,7 @@ detection time, so the dedup decision depends only on event time.
 | `trigger_rule` | `payments-5xx-burst-after-deployment` |
 | `dedup_key` | Section 11 (ClickHouse column; not in the public payload) |
 | `publication_state` | `pending` |
-| `published_at` | `1970-01-01 00:00:00.000000000` (zero time) |
+| `published_at` | `NULL` |
 
 ### 12.2 Evidence
 
@@ -606,10 +606,10 @@ condition `service_completed_successfully` and on `clickhouse` with condition
 
 **Store operations used by the publisher.**
 - `PendingIncidents()`: returns the latest revision of every incident whose
-  `publication_state` is `pending`.
+  `publication_state` is `pending` and whose `published_at` is `NULL`.
 - `EvidenceCount(incident_id)`: returns the number of evidence rows for an incident.
 - `MarkIncidentPublished(incident, published_at)`: inserts revision `incident.revision + 1`
-  with `publication_state = published` and `published_at`, all other fields copied.
+  with `publication_state = published` and a non-null `published_at`, all other fields copied.
 
 **Publisher cycle, for each pending incident:**
 1. If `EvidenceCount` is less than 4, skip it. The correlator repairs evidence (section 12.2),

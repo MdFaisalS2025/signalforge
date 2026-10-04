@@ -268,8 +268,8 @@ type Store interface {
     InsertIncidentWithEvidence(ctx context.Context, inc IncidentRow, ev []EvidenceRow) error // inc.Revision == 1, state pending
     InsertEvidence(ctx context.Context, ev []EvidenceRow) error                  // idempotent by evidence_id
     EvidenceCount(ctx context.Context, incidentID string) (int, error)
-    PendingIncidents(ctx context.Context) ([]IncidentRow, error)                 // latest revision with publication_state = pending
-    MarkIncidentPublished(ctx context.Context, inc IncidentRow, publishedAt time.Time) error // inserts revision inc.Revision+1, state published
+    PendingIncidents(ctx context.Context) ([]IncidentRow, error)                 // latest revision with publication_state = pending AND published_at IS NULL
+    MarkIncidentPublished(ctx context.Context, inc IncidentRow, publishedAt time.Time) error // inserts revision inc.Revision+1, state published, non-null published_at
     InsertCorrelationRun(ctx context.Context, run CorrelationRun) error
     LatestEvaluatedUntil(ctx context.Context) (time.Time, error)
 }
@@ -285,7 +285,7 @@ type IncidentRow struct {
     Services                                                                     []string
     Revision                                                                     uint64
     PublicationState                                                             string    // "pending" | "published"
-    PublishedAt                                                                  time.Time // zero time (1970-01-01 UTC) while pending
+    PublishedAt                                                                  *time.Time // nil while pending (SQL NULL); non-nil UTC time once published
 }
 type EvidenceRow struct {
     EvidenceID, IncidentID, SourceType, SourceRef, Service, Summary, Reliability string
@@ -368,7 +368,7 @@ Constants (fixed, not environment-configurable, except the two test hooks):
 | `BackoffGiveUp` | 2 min |
 | `TriggerRule` | `payments-5xx-burst-after-deployment` |
 | `Namespace` | `8f3c2a9e-5d1b-4f6a-b7c8-2e9d0a1b3c4d` |
-| `ZeroTime` | `1970-01-01T00:00:00Z` (`publication_state` `pending` value of `published_at`) |
+| `PublishedAtPending` | `nil` (`*time.Time`; SQL `NULL`) while `publication_state` is `pending` |
 
 Test hooks, read by `internal/config` (Task 9):
 
@@ -988,7 +988,7 @@ from `CLICKHOUSE_DB`).
   `title String`, `status LowCardinality(String)`, `severity LowCardinality(String)`,
   `started_at DateTime64(9, 'UTC')`, `detected_at DateTime64(9, 'UTC')`,
   `services Array(String)`, `publication_state LowCardinality(String)`,
-  `published_at DateTime64(9, 'UTC')`.
+  `published_at Nullable(DateTime64(9, 'UTC'))`.
 - `evidence_items`: `ReplacingMergeTree(ingested_at)`, `ORDER BY evidence_id`; `evidence_id UUID`,
   `incident_id UUID`, `source_type LowCardinality(String)`, `source_ref String`,
   `timestamp DateTime64(9, 'UTC')`, `service LowCardinality(String)`, `summary String`,
@@ -1022,10 +1022,10 @@ SELECT incident_id, revision, dedup_key, environment, service, deployment_id, tr
        status, severity, started_at, detected_at, services, publication_state, published_at
 FROM incidents FINAL WHERE dedup_key = ?
 
--- PendingIncidents: latest revision that is still pending
+-- PendingIncidents: latest revision that is still pending (published_at is NULL)
 SELECT incident_id, revision, dedup_key, environment, service, deployment_id, trigger_rule, title,
        status, severity, started_at, detected_at, services, publication_state, published_at
-FROM incidents FINAL WHERE publication_state = 'pending'
+FROM incidents FINAL WHERE publication_state = 'pending' AND published_at IS NULL
 
 -- EvidenceCount
 SELECT count() FROM evidence_items FINAL WHERE incident_id = ?
@@ -1035,10 +1035,12 @@ SELECT max(evaluated_until) FROM correlation_runs
 ```
 
 `MarkIncidentPublished(inc, publishedAt)` inserts one row into `incidents` with
-`revision = inc.Revision + 1`, `publication_state = 'published'`, `published_at = publishedAt`, and
-every other field copied from `inc` (including `detected_at`). `InsertIncidentWithEvidence` inserts
-the incident row followed by the evidence rows as two insert batches. `InsertEvidence` inserts rows
-with the deterministic `evidence_id`, so repeated inserts are harmless.
+`revision = inc.Revision + 1`, `publication_state = 'published'`, `published_at = publishedAt` (non-null
+UTC), and every other field copied from `inc` (including `detected_at`). `InsertIncidentWithEvidence`
+inserts the incident row followed by the evidence rows as two insert batches; a pending row is sent with
+`PublishedAt = nil`, which the driver writes as `NULL`. Reads scan `published_at` into `*time.Time`, so
+`NULL` maps to `nil`. `InsertEvidence` inserts rows with the deterministic `evidence_id`, so repeated
+inserts are harmless.
 
 **Fake store** (`fake_test.go`, `package store`, shared by Tasks 8): an in-memory `Store` that
 reproduces `ReplacingMergeTree` semantics. For `incidents` it keeps all revisions and returns the one
@@ -1049,19 +1051,20 @@ with the highest `revision` per `incident_id`; for `evidence_items` it keeps one
 ```go
 func TestFakeIncidentRevisionsReplace(t *testing.T) {
     f := NewFake()
-    inc := IncidentRow{IncidentID: "I", DedupKey: "k", Revision: 1, PublicationState: "pending"}
+    inc := IncidentRow{IncidentID: "I", DedupKey: "k", Revision: 1, PublicationState: "pending", PublishedAt: nil}
     _ = f.InsertIncidentWithEvidence(ctx, inc, nil)
     inc.Revision = 2; inc.PublicationState = "published"
-    _ = f.MarkIncidentPublished(ctx, inc, time.Unix(100, 0))
+    _ = f.MarkIncidentPublished(ctx, inc, time.Unix(100, 0).UTC())
     rows, _ := f.IncidentsByKey(ctx, "k")
-    if len(rows) != 1 || rows[0].Revision != 2 || rows[0].PublicationState != "published" { t.Fatalf("%+v", rows) }
+    if len(rows) != 1 || rows[0].Revision != 2 || rows[0].PublicationState != "published" || rows[0].PublishedAt == nil { t.Fatalf("%+v", rows) }
 }
 ```
 
 **Integration test** (`clickhouse_integration_test.go`): skipped unless `CLICKHOUSE_HOST` is set.
 When set, it calls `MigrateUp` twice and asserts the second call applies zero versions, inserts one
 `telemetry_events` row with a nanosecond timestamp, reads it back with `FINAL`, and asserts equal
-nanosecond timestamps.
+nanosecond timestamps. It also inserts a pending incident revision and asserts that `PendingIncidents`
+returns it with `PublishedAt == nil`, then marks it published and asserts a non-nil `PublishedAt`.
 
 ```
 node scripts/go-in-docker.mjs go test ./internal/store/... -run 'TestSplitStatements|TestPendingSkipsApplied|TestVersionFromFilename|TestFakeIncidentRevisionsReplace'
@@ -1438,7 +1441,7 @@ GREEN: `RunCycle(ctx, now)`:
    - If some existing row has `IncidentID == id`: insert the four evidence rows via `InsertEvidence`
      (idempotent). No incident insert, and nothing is published.
    - Else if `Suppressed(existing, candidate.StartedAt)`: skip.
-   - Else: `InsertIncidentWithEvidence(IncidentRow{... Revision: 1, PublicationState: "pending", PublishedAt: ZeroTime, DetectedAt: now}, evidence)`.
+   - Else: `InsertIncidentWithEvidence(IncidentRow{... Revision: 1, PublicationState: "pending", PublishedAt: nil, DetectedAt: now}, evidence)`.
 4. `InsertCorrelationRun` with `EvaluatedUntil` as in section 8.3.
 
 **RED → GREEN, publisher** (`publisher_test.go`; fake store and fake producer):
@@ -1813,7 +1816,7 @@ A5. Poll (500 ms, 60 s) for exactly one row in `IncidentsByKey(<env>|demo-paymen
     `detected_at >= started_at`. Let `I1` be the incident ID.
 A6. Assert exactly four `evidence_items` rows for `I1` (`EvidenceCount = 4`): one `deployment` row with
     `source_ref = D1`, and three `trace` rows whose `source_ref` set equals `{T(O1), T(O2), T(O3)}`.
-A7. Poll (500 ms, 60 s) until the latest revision of `I1` has `publication_state = 'published'`. Then
+A7. Poll (500 ms, 60 s) until the latest revision of `I1` has `publication_state = 'published'` and a non-null `published_at`. Then
     `consumeBounded({ topic: 'incidents.created.v1', num: 50, offset: 'start' })` must return exactly one
     record with key/`incident_id` `I1` (healthy path: one message).
 A8. Dedup. `O4, O5, O6 = sendOrders(3)`. Resolve their traces as in A4 (against `D1`, the same
@@ -1838,7 +1841,7 @@ A10. Idempotency. Build one valid trace message with fixed IDs (`traceId` `0af76
 B1. `setCollectorHooks({ failAttempts: 2, crash: 0 })`.
 B2. `deployFaulty('0.3.0-faulty')` → `D2`. `O7, O8, O9 = sendOrders(3)`. Resolve traces; assert the
     Payments failure set for `D2` equals `{T(O7), T(O8), T(O9)}`.
-B3. Poll (500 ms, 60 s) for the `D2` incident (latest revision) with `publication_state = 'published'`.
+B3. Poll (500 ms, 60 s) for the `D2` incident (latest revision) with `publication_state = 'published'` and a non-null `published_at`.
     Let `I2` be its ID. Assert:
     - the `collector-go` logs contain at least two `publish failed` lines for `I2` (the two injected failures);
     - exactly one `IncidentsByKey` row for the `D2` dedup key;
@@ -1858,7 +1861,7 @@ C3. Poll (500 ms, 60 s) until the `collector-go` container state is `exited` wit
     (`docker inspect --format {{.State.Status}} {{.State.ExitCode}}`).
 C4. `setCollectorHooks({ failAttempts: 0, crash: 0 })`: recreate with default hooks, which restarts the
     service.
-C5. Poll (500 ms, 60 s) until the `D3` incident (latest revision) has `publication_state = 'published'`.
+C5. Poll (500 ms, 60 s) until the `D3` incident (latest revision) has `publication_state = 'published'` and a non-null `published_at`.
     Let `I3` be its ID. Assert:
     - exactly one `IncidentsByKey` row for the `D3` dedup key after `FINAL`;
     - exactly four evidence rows for `I3`;
