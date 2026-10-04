@@ -44,3 +44,6 @@ Thumbs.db
 # SignalForge_Project_Plan.docx, kept on disk for local reference only.
 /SignalForge_Project_Plan_QA.pdf
 /signalforge_render/
+
+# Go service build output (Task 4): compiled binaries, never committed.
+services/collector-go/bin/
