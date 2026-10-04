@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -34,29 +35,63 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
-func TestClickHouseMigrationsApplyOnlyOnce(t *testing.T) {
+func TestIntegrationClickHouseMigrationsApplyOnlyOnce(t *testing.T) {
 	ctx := context.Background()
 	c := integrationStore(t)
-	if err := c.MigrateUp(ctx); err != nil {
+	// The stack may already have applied the migrations at startup, so the first call may report 0.
+	// The contract is that the schema_migrations rows equal the embedded files, and a repeat applies 0.
+	if _, err := c.MigrateUpWithCount(ctx); err != nil {
 		t.Fatal(err)
 	}
 	var before uint64
 	if err := c.conn.QueryRow(ctx, "SELECT count() FROM schema_migrations").Scan(&before); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.MigrateUp(ctx); err != nil {
+	all, err := loadMigrations()
+	if err != nil {
 		t.Fatal(err)
+	}
+	if before != uint64(len(all)) {
+		t.Fatalf("schema_migrations has %d rows, want %d", before, len(all))
+	}
+	applied, err := c.MigrateUpWithCount(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied != 0 {
+		t.Fatalf("second run reported applied=%d, want 0", applied)
 	}
 	var after uint64
 	if err := c.conn.QueryRow(ctx, "SELECT count() FROM schema_migrations").Scan(&after); err != nil {
 		t.Fatal(err)
 	}
 	if after != before {
-		t.Fatalf("second run applied %d migrations, want 0", after-before)
+		t.Fatalf("second run added %d schema_migrations rows", after-before)
 	}
 }
 
-func TestClickHouseNanosecondTimestampsRoundTripUnderFinal(t *testing.T) {
+// A fresh database applies every migration exactly once and reports the actual count. The test can
+// only observe that count when it runs against an empty database, so it is skipped otherwise.
+func TestIntegrationClickHouseFreshDatabaseReportsAppliedCount(t *testing.T) {
+	if os.Getenv("CLICKHOUSE_FRESH_DATABASE") != "1" {
+		t.Skip("set CLICKHOUSE_FRESH_DATABASE=1 on a database with no schema_migrations table")
+	}
+	ctx := context.Background()
+	c := integrationStore(t)
+	all, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	applied, err := c.MigrateUpWithCount(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied != len(all) {
+		t.Fatalf("applied=%d, want %d", applied, len(all))
+	}
+}
+
+func TestIntegrationClickHouseNanosecondTimestampsRoundTripUnderFinal(t *testing.T) {
 	ctx := context.Background()
 	c := integrationStore(t)
 	if err := c.MigrateUp(ctx); err != nil {
@@ -64,12 +99,14 @@ func TestClickHouseNanosecondTimestampsRoundTripUnderFinal(t *testing.T) {
 	}
 	ts := time.Date(2026, 10, 3, 12, 0, 0, 123456789, time.UTC)
 	const eventID = "00000000-0000-4000-8000-00000000e001"
-	if err := c.conn.Exec(ctx,
-		`INSERT INTO telemetry_events (event_id, schema_version, timestamp, ingested_at, type, service, service_version,
-		 environment, deployment_id, trace_id, span_id, severity, attributes)
-		 VALUES (?, '1', ?, now64(3), 'trace', 'demo-payments', '', 'local', '', '', '', '', '{}')`,
-		eventID, ts,
-	); err != nil {
+	// Insert through the production batch path. A scalar Exec parameter loses sub-second precision in
+	// the driver, which would test the wrong thing.
+	event := canonical.Event{
+		EventID: eventID, SchemaVersion: "1.0", Timestamp: ts, Type: "trace", Service: "demo-payments",
+		Environment: "local", TraceID: "0af7651916cd43dd8448eb211c80319c", SpanID: "b7ad6b7169203331",
+		Severity: "info", Attributes: map[string]any{},
+	}
+	if err := c.InsertEvents(ctx, []canonical.Event{event}); err != nil {
 		t.Fatal(err)
 	}
 	var got time.Time
@@ -83,14 +120,16 @@ func TestClickHouseNanosecondTimestampsRoundTripUnderFinal(t *testing.T) {
 	}
 }
 
-func TestClickHousePendingPublishedAtReadsNil(t *testing.T) {
+func TestIntegrationClickHousePendingPublishedAtReadsNil(t *testing.T) {
 	ctx := context.Background()
 	c := integrationStore(t)
 	if err := c.MigrateUp(ctx); err != nil {
 		t.Fatal(err)
 	}
-	const incidentID = "00000000-0000-4000-8000-000000001001"
-	key := "integration|demo-payments|D-int|payments-5xx-burst-after-deployment"
+	// Each run gets its own incident and key, so earlier runs' revisions cannot affect the assertions.
+	run := strconv.FormatInt(time.Now().UnixNano(), 10)
+	incidentID := canonical.EventID("integration-incident|" + run)
+	key := "integration|demo-payments|" + run + "|payments-5xx-burst-after-deployment"
 	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
 	pending := IncidentRow{
 		IncidentID: incidentID, DedupKey: key, Environment: "local", Service: "demo-payments",
@@ -124,7 +163,7 @@ func TestClickHousePendingPublishedAtReadsNil(t *testing.T) {
 
 // Canonical writes and reads: one event round-trips with its nanosecond timestamp and attributes, and
 // one succeeded deployment is returned by SucceededDeployments.
-func TestClickHouseCanonicalEventAndSucceededDeployment(t *testing.T) {
+func TestIntegrationClickHouseCanonicalEventAndSucceededDeployment(t *testing.T) {
 	ctx := context.Background()
 	c := integrationStore(t)
 	if err := c.MigrateUp(ctx); err != nil {

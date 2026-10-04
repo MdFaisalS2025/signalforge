@@ -66,7 +66,9 @@ func (p *Publisher) RunCycle(ctx context.Context) error {
 		}
 		if err := p.Store.MarkIncidentPublished(ctx, inc, p.Now()); err != nil {
 			p.logger().Error("publish state write failed", "incident_id", inc.IncidentID, "error", err)
+			continue
 		}
+		p.logger().Info("incident published", "incident_id", inc.IncidentID)
 	}
 	return nil
 }

@@ -1,10 +1,13 @@
 package ingest
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -115,10 +118,15 @@ func (s *fakeStore) LatestEvaluatedUntil(ctx context.Context) (time.Time, error)
 
 type fakeConsumer struct {
 	committed []int64
+	pending   []Record // returned by the next Poll, then cleared
 	log       *[]string
 }
 
-func (c *fakeConsumer) Poll(ctx context.Context) ([]Record, error) { return nil, nil }
+func (c *fakeConsumer) Poll(ctx context.Context) ([]Record, error) {
+	records := c.pending
+	c.pending = nil
+	return records, nil
+}
 
 func (c *fakeConsumer) Commit(ctx context.Context, records []Record) error {
 	for _, r := range records {
@@ -180,6 +188,72 @@ func newFakes() fakes {
 
 func newNormalizer(f fakes, b *Backoff) *Normalizer {
 	return &Normalizer{Consumer: f.consumer, Producer: f.producer, Store: f.store, Now: fixedNow, Backoff: b}
+}
+
+// captureLog returns a JSON logger whose output can be searched for exact message names.
+func captureLog() (*slog.Logger, *bytes.Buffer) {
+	var buf bytes.Buffer
+	return slog.New(slog.NewJSONHandler(&buf, nil)), &buf
+}
+
+func TestDeadLetterProducedIsLoggedOnlyAfterProduceSucceeds(t *testing.T) {
+	f := newFakes()
+	n := newNormalizer(f, NewBackoff())
+	log, buf := captureLog()
+	n.Log = log
+	if err := n.ProcessBatch(ctx, []Record{invalidTraceRecordNoTraceID(50)}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), `"msg":"dead letter produced"`) {
+		t.Fatalf("missing event: %s", buf.String())
+	}
+
+	failing := newFakes()
+	failing.producer.Fail(true)
+	m := newNormalizer(failing, instantBackoff(1))
+	failLog, failBuf := captureLog()
+	m.Log = failLog
+	if err := m.ProcessBatch(ctx, []Record{invalidTraceRecordNoTraceID(51)}); err == nil {
+		t.Fatal("expected error")
+	}
+	if strings.Contains(failBuf.String(), "dead letter produced") {
+		t.Fatalf("logged before a successful produce: %s", failBuf.String())
+	}
+}
+
+func TestBatchProcessedIsLoggedOnlyForNonEmptySuccessfulPolls(t *testing.T) {
+	f := newFakes()
+	n := newNormalizer(f, NewBackoff())
+	log, buf := captureLog()
+	n.Log = log
+
+	if err := n.PollOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "batch processed") {
+		t.Fatalf("empty poll logged a batch: %s", buf.String())
+	}
+
+	f.consumer.pending = []Record{validTraceRecord(60)}
+	if err := n.PollOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(buf.String(), `"msg":"batch processed"`) != 1 {
+		t.Fatalf("expected one batch event: %s", buf.String())
+	}
+
+	failing := newFakes()
+	failing.store.FailWrite(true)
+	m := newNormalizer(failing, instantBackoff(1))
+	failLog, failBuf := captureLog()
+	m.Log = failLog
+	failing.consumer.pending = []Record{validTraceRecord(61)}
+	if err := m.PollOnce(ctx); err == nil {
+		t.Fatal("expected error")
+	}
+	if strings.Contains(failBuf.String(), "batch processed") {
+		t.Fatalf("logged a failed batch: %s", failBuf.String())
+	}
 }
 
 func decodeDeadLetter(t *testing.T, value []byte) canonical.DeadLetter {

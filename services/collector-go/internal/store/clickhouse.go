@@ -56,36 +56,45 @@ func loadMigrations() ([]migration, error) {
 	return all, nil
 }
 
-// MigrateUp applies every embedded migration whose version is above the highest recorded version.
-// Each migration's statements run first; its schema_migrations row is written only after they all
-// succeed, so a failed migration is retried on the next start.
+// MigrateUp applies pending migrations. It is MigrateUpWithCount without the count.
 func (c *ClickHouse) MigrateUp(ctx context.Context) error {
+	_, err := c.MigrateUpWithCount(ctx)
+	return err
+}
+
+// MigrateUpWithCount applies every embedded migration whose version is above the highest recorded
+// version and returns how many were applied by this call. Each migration's statements run first; its
+// schema_migrations row is written only after they all succeed, so a failed migration is retried on the
+// next start. A count of zero means the schema was already current.
+func (c *ClickHouse) MigrateUpWithCount(ctx context.Context) (int, error) {
 	all, err := loadMigrations()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	applied, err := c.appliedVersion(ctx)
 	if err != nil {
-		return err
+		return 0, err
 	}
+	count := 0
 	for _, m := range pending(all, applied) {
 		body, err := migrationFiles.ReadFile("migrations/" + m.Name)
 		if err != nil {
-			return err
+			return count, err
 		}
 		for _, stmt := range splitStatements(string(body)) {
 			if err := c.conn.Exec(ctx, stmt); err != nil {
-				return fmt.Errorf("migration %s: %w", m.Name, err)
+				return count, fmt.Errorf("migration %s: %w", m.Name, err)
 			}
 		}
 		if err := c.conn.Exec(ctx,
 			"INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
 			uint32(m.Version), m.Name, time.Now().UTC(),
 		); err != nil {
-			return fmt.Errorf("record migration %s: %w", m.Name, err)
+			return count, fmt.Errorf("record migration %s: %w", m.Name, err)
 		}
+		count++
 	}
-	return nil
+	return count, nil
 }
 
 // appliedVersion returns the highest recorded migration version, or 0 before the first migration

@@ -3,6 +3,7 @@ package correlate
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"time"
 
@@ -65,12 +66,11 @@ func (c *Correlator) handle(ctx context.Context, cand Candidate, now time.Time) 
 		if err := c.Store.InsertEvidence(ctx, evidence); err != nil {
 			return fmt.Errorf("repair evidence for %s: %w", id, err)
 		}
+		c.logger().Info("incident evidence repaired", "incident_id", id)
 		return nil
 	}
 	if Suppressed(existing, cand.StartedAt) {
-		if c.Log != nil {
-			c.Log.Info("candidate suppressed by dedup window", "dedup_key", key, "started_at", cand.StartedAt)
-		}
+		c.logger().Info("incident suppressed", "dedup_key", key, "started_at", cand.StartedAt)
 		return nil
 	}
 
@@ -94,7 +94,15 @@ func (c *Correlator) handle(ctx context.Context, cand Candidate, now time.Time) 
 	if err := c.Store.InsertIncidentWithEvidence(ctx, inc, evidence); err != nil {
 		return fmt.Errorf("create incident %s: %w", id, err)
 	}
+	c.logger().Info("incident created", "incident_id", id, "dedup_key", key, "started_at", cand.StartedAt)
 	return nil
+}
+
+func (c *Correlator) logger() *slog.Logger {
+	if c.Log != nil {
+		return c.Log
+	}
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
 // evidenceFor builds the four evidence rows of a candidate: the deployment and the three trigger traces.

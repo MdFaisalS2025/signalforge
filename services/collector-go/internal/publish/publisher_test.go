@@ -1,6 +1,7 @@
 package publish
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"log/slog"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -353,6 +355,41 @@ func TestPublishFailHookFailsFirstNAttempts(t *testing.T) {
 	_ = pub.RunCycle(ctx)
 	if len(p.Sent()) != 1 {
 		t.Fatalf("produces: %d", len(p.Sent()))
+	}
+}
+
+// captureLog returns a JSON logger whose output can be searched for exact event names.
+func captureLog() (*slog.Logger, *bytes.Buffer) {
+	var buf bytes.Buffer
+	return slog.New(slog.NewJSONHandler(&buf, nil)), &buf
+}
+
+func TestIncidentPublishedIsLoggedOnlyAfterMarkSucceeds(t *testing.T) {
+	s := newFakeStore()
+	seedPendingIncident(s, 4)
+	p := &fakeProducer{}
+	log, buf := captureLog()
+	pub := &Publisher{Store: s, Producer: p, Now: fixed(t0), Exit: noExit, Log: log}
+	if err := pub.RunCycle(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), `"msg":"incident published"`) {
+		t.Fatalf("missing published event: %s", buf.String())
+	}
+
+	s2 := newFakeStore()
+	seedPendingIncident(s2, 4)
+	s2.FailWrite(true)
+	failLog, failBuf := captureLog()
+	pub2 := &Publisher{Store: s2, Producer: &fakeProducer{}, Now: fixed(t0), Exit: noExit, Log: failLog}
+	if err := pub2.RunCycle(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(failBuf.String(), "incident published") {
+		t.Fatalf("logged published after a failed state write: %s", failBuf.String())
+	}
+	if !strings.Contains(failBuf.String(), "publish state write failed") {
+		t.Fatalf("existing state-write failure event missing: %s", failBuf.String())
 	}
 }
 

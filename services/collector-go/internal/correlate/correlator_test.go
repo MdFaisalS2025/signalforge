@@ -1,9 +1,12 @@
 package correlate
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -328,6 +331,66 @@ func TestCorrelationRunUsesNowWithoutFailures(t *testing.T) {
 	}
 	if u, _ := s.LatestEvaluatedUntil(ctx); !u.Equal(now) {
 		t.Fatalf("evaluated_until %v, want %v", u, now)
+	}
+}
+
+// captureLog returns a JSON logger whose output can be searched for exact event names.
+func captureLog() (*slog.Logger, *bytes.Buffer) {
+	var buf bytes.Buffer
+	return slog.New(slog.NewJSONHandler(&buf, nil)), &buf
+}
+
+func TestCorrelatorLogsCreatedRepairedAndSuppressedEvents(t *testing.T) {
+	s := newFakeStore()
+	seedBurst(s, t0, dep)
+	created, createdBuf := captureLog()
+	c := &Correlator{Store: s, Now: fixed(t0.Add(time.Minute)), Log: created}
+	if err := c.RunCycle(ctx, c.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(createdBuf.String(), `"msg":"incident created"`) {
+		t.Fatalf("missing created event: %s", createdBuf.String())
+	}
+
+	s.DropEvidenceAfterFirst()
+	repaired, repairedBuf := captureLog()
+	c.Log = repaired
+	if err := c.RunCycle(ctx, c.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(repairedBuf.String(), `"msg":"incident evidence repaired"`) ||
+		strings.Contains(repairedBuf.String(), `"msg":"incident created"`) {
+		t.Fatalf("repair event wrong: %s", repairedBuf.String())
+	}
+
+	s.FailWrite(true)
+	failed, failedBuf := captureLog()
+	c.Log = failed
+	s.DropEvidenceAfterFirst()
+	if err := c.RunCycle(ctx, c.Now()); err == nil {
+		t.Fatal("expected repair error")
+	}
+	if strings.Contains(failedBuf.String(), "incident evidence repaired") {
+		t.Fatalf("logged repair before a successful write: %s", failedBuf.String())
+	}
+	s.FailWrite(false)
+
+	s2 := newFakeStore()
+	seedBurst(s2, t0, dep)
+	s2.incidents["prior"] = []store.IncidentRow{{
+		IncidentID: "prior", DedupKey: burstKey, Environment: "local", Service: "demo-payments",
+		DeploymentID: "D1", TriggerRule: TriggerRule, Status: "open", Severity: "high",
+		StartedAt: t0.Add(-2 * time.Minute), DetectedAt: t0.Add(-2 * time.Minute),
+		Services: []string{"demo-payments"}, Revision: 1, PublicationState: "pending",
+	}}
+	suppressed, suppressedBuf := captureLog()
+	c2 := &Correlator{Store: s2, Now: fixed(t0.Add(time.Minute)), Log: suppressed}
+	if err := c2.RunCycle(ctx, c2.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(suppressedBuf.String(), `"msg":"incident suppressed"`) ||
+		strings.Contains(suppressedBuf.String(), `"msg":"incident created"`) {
+		t.Fatalf("suppression event wrong: %s", suppressedBuf.String())
 	}
 }
 

@@ -17,6 +17,10 @@ type Config struct {
 	ClickHouseDatabase string
 	ClickHouseUser     string
 	ClickHousePassword string
+
+	// Acceptance-only hooks. Both default off; see the README.
+	IncidentPublishFailAttempts int
+	IncidentCrashAfterProduce   bool
 }
 
 // Load validates the settings in the order the plan defines. An unset variable and an empty
@@ -61,13 +65,33 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 		port = parsed
 	}
 
+	failAttempts := 0
+	if raw := get("INCIDENT_PUBLISH_FAIL_ATTEMPTS"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 {
+			return Config{}, errors.New("INCIDENT_PUBLISH_FAIL_ATTEMPTS must be a non-negative integer")
+		}
+		failAttempts = parsed
+	}
+
+	crashAfterProduce := false
+	switch raw := get("INCIDENT_CRASH_AFTER_PRODUCE"); raw {
+	case "", "0":
+	case "1":
+		crashAfterProduce = true
+	default:
+		return Config{}, errors.New("INCIDENT_CRASH_AFTER_PRODUCE must be 0 or 1")
+	}
+
 	return Config{
-		KafkaBrokers:       brokers,
-		ClickHouseHost:     host,
-		ClickHousePort:     port,
-		ClickHouseDatabase: database,
-		ClickHouseUser:     user,
-		ClickHousePassword: password,
+		KafkaBrokers:                brokers,
+		ClickHouseHost:              host,
+		ClickHousePort:              port,
+		ClickHouseDatabase:          database,
+		ClickHouseUser:              user,
+		ClickHousePassword:          password,
+		IncidentPublishFailAttempts: failAttempts,
+		IncidentCrashAfterProduce:   crashAfterProduce,
 	}, nil
 }
 

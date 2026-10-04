@@ -161,11 +161,22 @@ services:
     command: ["sleep", "infinity"]
 
   collector-go:
-    image: alpine:3.20
-    command: ["sleep", "infinity"]
+    build: ../../services/collector-go
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "9000"
+      CLICKHOUSE_DB: signalforge
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: changeme-local-only
+      INCIDENT_PUBLISH_FAIL_ATTEMPTS: ${INCIDENT_PUBLISH_FAIL_ATTEMPTS:-0}
+      INCIDENT_CRASH_AFTER_PRODUCE: ${INCIDENT_CRASH_AFTER_PRODUCE:-0}
     depends_on:
-      - redpanda
-      - clickhouse
+      redpanda-init:
+        condition: service_completed_successfully
+      clickhouse:
+        condition: service_healthy
+    restart: "no"
 
   agent-python:
     image: alpine:3.20

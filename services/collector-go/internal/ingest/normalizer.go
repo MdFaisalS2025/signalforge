@@ -3,6 +3,8 @@ package ingest
 import (
 	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"strconv"
 	"time"
 
@@ -23,7 +25,32 @@ type Normalizer struct {
 	Producer Producer
 	Store    store.Store
 	Now      func() time.Time
-	Backoff  *Backoff // template; each operation retries on its own copy
+	Backoff  *Backoff   // template; each operation retries on its own copy
+	Log      *slog.Logger // optional; receives the "dead letter produced" and "batch processed" events
+}
+
+// PollOnce fetches one poll. An empty poll does nothing. A non-empty batch is processed, and a
+// "batch processed" event is logged only after it succeeds.
+func (n *Normalizer) PollOnce(ctx context.Context) error {
+	records, err := n.Consumer.Poll(ctx)
+	if err != nil {
+		return fmt.Errorf("poll: %w", err)
+	}
+	if len(records) == 0 {
+		return nil
+	}
+	if err := n.ProcessBatch(ctx, records); err != nil {
+		return err
+	}
+	n.logger().Info("batch processed", "records", len(records))
+	return nil
+}
+
+func (n *Normalizer) logger() *slog.Logger {
+	if n.Log != nil {
+		return n.Log
+	}
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
 // pendingDeadLetter is one dead letter ready to produce, keyed by its source offset.
@@ -80,6 +107,7 @@ func (n *Normalizer) ProcessBatch(ctx context.Context, records []Record) error {
 		if err := n.retry(ctx, func() error { return n.Producer.Produce(ctx, deadLetterTopic, dl.key, dl.value) }); err != nil {
 			return fmt.Errorf("produce dead letter %s: %w", dl.key, err)
 		}
+		n.logger().Info("dead letter produced", "topic", deadLetterTopic, "key", dl.key)
 	}
 	return n.Consumer.Commit(ctx, records)
 }
