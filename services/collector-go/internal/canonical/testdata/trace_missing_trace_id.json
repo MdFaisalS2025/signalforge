@@ -1,0 +1,24 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          { "key": "service.name", "value": { "stringValue": "demo-orders" } }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "spans": [
+            {
+              "spanId": "b7ad6b7169203331",
+              "name": "POST /orders",
+              "kind": 2,
+              "startTimeUnixNano": "1790000000719000123",
+              "endTimeUnixNano": "1790000000819000123"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

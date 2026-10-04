@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"embed"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"sort"
@@ -10,6 +11,8 @@ import (
 
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+
+	"signalforge/collector-go/internal/canonical"
 )
 
 //go:embed migrations/*.sql
@@ -252,6 +255,83 @@ func (c *ClickHouse) LatestEvaluatedUntil(ctx context.Context) (time.Time, error
 		return time.Time{}, err
 	}
 	return latest, nil
+}
+
+// InsertEvents writes canonical events with an explicit column list and one prepared batch.
+// attributes is stored as a JSON object; ingested_at is the write time, the ReplacingMergeTree version.
+func (c *ClickHouse) InsertEvents(ctx context.Context, events []canonical.Event) error {
+	if len(events) == 0 {
+		return nil
+	}
+	batch, err := c.conn.PrepareBatch(ctx,
+		"INSERT INTO telemetry_events (event_id, schema_version, timestamp, ingested_at, type, service, service_version, environment, deployment_id, trace_id, span_id, severity, attributes)")
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	for _, e := range events {
+		attrs := e.Attributes
+		if attrs == nil {
+			attrs = map[string]any{}
+		}
+		raw, err := json.Marshal(attrs)
+		if err != nil {
+			return fmt.Errorf("encode attributes for %s: %w", e.EventID, err)
+		}
+		if err := batch.Append(
+			e.EventID, e.SchemaVersion, e.Timestamp.UTC(), now, e.Type, e.Service, e.ServiceVersion,
+			e.Environment, e.DeploymentID, e.TraceID, e.SpanID, e.Severity, string(raw),
+		); err != nil {
+			return err
+		}
+	}
+	return batch.Send()
+}
+
+// InsertDeployments writes canonical deployments with an explicit column list and one prepared batch.
+func (c *ClickHouse) InsertDeployments(ctx context.Context, deployments []canonical.Deployment) error {
+	if len(deployments) == 0 {
+		return nil
+	}
+	batch, err := c.conn.PrepareBatch(ctx,
+		"INSERT INTO deployments (deployment_id, timestamp, service, environment, new_version, previous_version, initiated_by, status, ingested_at)")
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	for _, d := range deployments {
+		if err := batch.Append(
+			d.DeploymentID, d.Timestamp.UTC(), d.Service, d.Environment, d.NewVersion,
+			d.PreviousVersion, d.InitiatedBy, d.Status, now,
+		); err != nil {
+			return err
+		}
+	}
+	return batch.Send()
+}
+
+const succeededDeploymentsSQL = `SELECT deployment_id, timestamp, service, environment, new_version, previous_version, initiated_by, status
+FROM deployments FINAL
+WHERE service = 'demo-payments' AND status = 'succeeded' AND timestamp >= ?
+ORDER BY timestamp`
+
+// SucceededDeployments reads demo-payments deployments with status succeeded, deduplicated with FINAL.
+func (c *ClickHouse) SucceededDeployments(ctx context.Context, since time.Time) ([]canonical.Deployment, error) {
+	rows, err := c.conn.Query(ctx, succeededDeploymentsSQL, since.UTC())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []canonical.Deployment
+	for rows.Next() {
+		var d canonical.Deployment
+		if err := rows.Scan(&d.DeploymentID, &d.Timestamp, &d.Service, &d.Environment, &d.NewVersion,
+			&d.PreviousVersion, &d.InitiatedBy, &d.Status); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
 }
 
 var _ Store = (*ClickHouse)(nil)

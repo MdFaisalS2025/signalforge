@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0",
+  "deployment_id": "d3b07384-d9a0-4a3e-8f4c-1a2b3c4d5e6f",
+  "timestamp": "2026-10-03T12:00:00Z",
+  "service": "demo-payments",
+  "environment": "local",
+  "previous_version": "0.1.0",
+  "new_version": "0.2.0-faulty",
+  "initiated_by": "deploy-script",
+  "status": "succeeded"
+}

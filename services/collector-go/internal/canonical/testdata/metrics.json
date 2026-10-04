@@ -1,0 +1,45 @@
+{
+  "resourceMetrics": [
+    {
+      "resource": {
+        "attributes": [
+          { "key": "service.name", "value": { "stringValue": "demo-payments" } }
+        ]
+      },
+      "scopeMetrics": [
+        {
+          "metrics": [
+            {
+              "name": "payments.charges",
+              "sum": {
+                "aggregationTemporality": 2,
+                "isMonotonic": true,
+                "dataPoints": [
+                  {
+                    "attributes": [
+                      { "key": "outcome", "value": { "stringValue": "failed" } }
+                    ],
+                    "timeUnixNano": "1790000000719000123",
+                    "asInt": "3"
+                  }
+                ]
+              }
+            },
+            {
+              "name": "payments.queue_depth",
+              "gauge": {
+                "dataPoints": [
+                  {
+                    "attributes": [],
+                    "timeUnixNano": "1790000000719000123",
+                    "asDouble": 7.5
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

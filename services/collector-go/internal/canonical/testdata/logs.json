@@ -1,0 +1,31 @@
+{
+  "resourceLogs": [
+    {
+      "resource": {
+        "attributes": [
+          { "key": "service.name", "value": { "stringValue": "demo-payments" } },
+          { "key": "deployment.id", "value": { "stringValue": "d3b07384-d9a0-4a3e-8f4c-1a2b3c4d5e6f" } }
+        ]
+      },
+      "scopeLogs": [
+        {
+          "logRecords": [
+            {
+              "timeUnixNano": "1790000000719000123",
+              "observedTimeUnixNano": "1790000000719999999",
+              "severityNumber": 17,
+              "severityText": "ERROR",
+              "body": { "stringValue": "charge failed" },
+              "attributes": [
+                { "key": "order_id", "value": { "stringValue": "11111111-1111-1111-1111-111111111111" } },
+                { "key": "amount_cents", "value": { "intValue": "4200" } }
+              ],
+              "traceId": "0af7651916cd43dd8448eb211c80319c",
+              "spanId": "b7ad6b7169203331"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

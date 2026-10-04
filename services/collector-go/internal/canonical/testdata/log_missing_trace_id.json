@@ -1,0 +1,23 @@
+{
+  "resourceLogs": [
+    {
+      "resource": {
+        "attributes": [
+          { "key": "service.name", "value": { "stringValue": "demo-payments" } }
+        ]
+      },
+      "scopeLogs": [
+        {
+          "logRecords": [
+            {
+              "timeUnixNano": "1790000000719000123",
+              "severityText": "ERROR",
+              "body": { "stringValue": "charge failed" },
+              "spanId": "b7ad6b7169203331"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

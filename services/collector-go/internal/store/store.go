@@ -3,12 +3,16 @@ package store
 import (
 	"context"
 	"time"
+
+	"signalforge/collector-go/internal/canonical"
 )
 
-// Store is the persistence boundary for correlation and publication. Methods that read or write
-// rows whose type comes from the canonical package are added with that package (Task 6).
+// Store is the persistence boundary for ingestion, correlation, and publication.
 type Store interface {
 	MigrateUp(ctx context.Context) error
+	InsertEvents(ctx context.Context, events []canonical.Event) error                  // idempotent by event_id
+	InsertDeployments(ctx context.Context, deployments []canonical.Deployment) error   // idempotent by deployment_id
+	SucceededDeployments(ctx context.Context, since time.Time) ([]canonical.Deployment, error) // status succeeded, demo-payments, FINAL
 	FailureTraces(ctx context.Context, since time.Time) ([]FailureRow, error)
 	IncidentsByKey(ctx context.Context, dedupKey string) ([]IncidentRow, error)           // latest revision per incident_id
 	InsertIncidentWithEvidence(ctx context.Context, inc IncidentRow, ev []EvidenceRow) error // inc.Revision == 1, state pending, PublishedAt nil

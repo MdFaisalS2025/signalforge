@@ -1,0 +1,161 @@
+package canonical
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func load(t *testing.T, name string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func find(events []Event, match func(Event) bool) Event {
+	for _, e := range events {
+		if match(e) {
+			return e
+		}
+	}
+	return Event{}
+}
+
+func TestTraceMappingCopiesIDsFromPayload(t *testing.T) {
+	events, reason := MapTelemetryMessage(load(t, "traces.json"))
+	if reason != "" {
+		t.Fatal(reason)
+	}
+	got := find(events, func(e Event) bool { return e.SpanID == "b7ad6b7169203331" })
+	if got.TraceID != "0af7651916cd43dd8448eb211c80319c" {
+		t.Fatalf("trace id not copied: %q", got.TraceID)
+	}
+	if got.Type != "trace" || got.Service != "demo-payments" || got.DeploymentID != "d3b07384-d9a0-4a3e-8f4c-1a2b3c4d5e6f" {
+		t.Fatalf("%+v", got)
+	}
+	if got.Timestamp.Nanosecond() != 719000123 {
+		t.Fatalf("ns lost: %d", got.Timestamp.Nanosecond())
+	}
+	if got.Attributes["http.response.status_code"] != float64(500) {
+		t.Fatalf("status attr: %v", got.Attributes)
+	}
+	if got.Attributes["span.kind"] != "server" {
+		t.Fatalf("kind: %v", got.Attributes)
+	}
+}
+
+func TestLogAttributesArePreserved(t *testing.T) {
+	events, reason := MapTelemetryMessage(load(t, "logs.json"))
+	if reason != "" {
+		t.Fatal(reason)
+	}
+	got := events[0]
+	if got.Attributes["order_id"] != "11111111-1111-1111-1111-111111111111" {
+		t.Fatalf("order_id lost: %v", got.Attributes)
+	}
+	if got.TraceID != "0af7651916cd43dd8448eb211c80319c" || got.Severity != "error" {
+		t.Fatalf("%+v", got)
+	}
+}
+
+func TestTraceWithoutTraceIDIsRejected(t *testing.T) {
+	_, reason := MapTelemetryMessage(load(t, "trace_missing_trace_id.json"))
+	if reason != "trace_id and span_id are required for trace events" {
+		t.Fatalf("got %q", reason)
+	}
+}
+
+func TestLogWithoutTraceIDIsRejected(t *testing.T) {
+	_, reason := MapTelemetryMessage(load(t, "log_missing_trace_id.json"))
+	if reason != "trace_id is required for log events" {
+		t.Fatalf("got %q", reason)
+	}
+}
+
+func TestMetricHasNoTraceID(t *testing.T) {
+	events, reason := MapTelemetryMessage(load(t, "metrics.json"))
+	if reason != "" {
+		t.Fatal(reason)
+	}
+	for _, e := range events {
+		if e.Type == "metric" && e.TraceID != "" {
+			t.Fatalf("fabricated trace id: %q", e.TraceID)
+		}
+	}
+}
+
+func TestMissingServiceNameIsRejected(t *testing.T) {
+	_, reason := MapTelemetryMessage(load(t, "traces_no_service.json"))
+	if reason != "service.name resource attribute is required" {
+		t.Fatalf("got %q", reason)
+	}
+}
+
+func TestInvalidJSONIsRejected(t *testing.T) {
+	_, reason := MapTelemetryMessage([]byte("{not json"))
+	if reason != "invalid JSON payload" {
+		t.Fatalf("got %q", reason)
+	}
+}
+
+func TestExactlyOneTopLevelKey(t *testing.T) {
+	_, reason := MapTelemetryMessage([]byte(`{}`))
+	if reason != "payload must contain exactly one of resourceSpans, resourceLogs, resourceMetrics" {
+		t.Fatalf("got %q", reason)
+	}
+}
+
+func TestDeploymentMappingAndStatus(t *testing.T) {
+	d, reason := MapDeploymentMessage(load(t, "deployment.json"))
+	if reason != "" || d.DeploymentID != "d3b07384-d9a0-4a3e-8f4c-1a2b3c4d5e6f" {
+		t.Fatalf("%+v %q", d, reason)
+	}
+	_, reason = MapDeploymentMessage([]byte(`{"schema_version":"1.0","deployment_id":"x","timestamp":"2026-10-03T12:00:00Z","service":"demo-payments","new_version":"v","status":"failed"}`))
+	if reason != "deployment event status must be succeeded" {
+		t.Fatalf("got %q", reason)
+	}
+}
+
+// Identity keys (spec 7.5). Each event_id must equal EventID over the planned key.
+func TestSpanEventIDUsesPlannedKey(t *testing.T) {
+	events, _ := MapTelemetryMessage(load(t, "traces.json"))
+	want := EventID("trace|0af7651916cd43dd8448eb211c80319c|b7ad6b7169203331")
+	if events[0].EventID != want {
+		t.Fatalf("got %s, want %s", events[0].EventID, want)
+	}
+}
+
+func TestLogEventIDUsesPlannedKey(t *testing.T) {
+	events, _ := MapTelemetryMessage(load(t, "logs.json"))
+	sum := sha256.Sum256([]byte("charge failed"))
+	want := EventID("log|0af7651916cd43dd8448eb211c80319c|b7ad6b7169203331|1790000000719000123|" + hex.EncodeToString(sum[:]))
+	if events[0].EventID != want {
+		t.Fatalf("got %s, want %s", events[0].EventID, want)
+	}
+}
+
+func TestMetricEventIDUsesPlannedKey(t *testing.T) {
+	events, _ := MapTelemetryMessage(load(t, "metrics.json"))
+	got := find(events, func(e Event) bool { return e.Attributes["metric.name"] == "payments.charges" })
+	want := EventID("metric|demo-payments|payments.charges|outcome=failed|1790000000719000123")
+	if got.EventID != want {
+		t.Fatalf("got %s, want %s", got.EventID, want)
+	}
+}
+
+func TestMetricValuesAndKinds(t *testing.T) {
+	events, _ := MapTelemetryMessage(load(t, "metrics.json"))
+	sum := find(events, func(e Event) bool { return e.Attributes["metric.name"] == "payments.charges" })
+	if sum.Attributes["metric.kind"] != "sum" || sum.Attributes["metric.value"] != float64(3) || sum.Attributes["outcome"] != "failed" {
+		t.Fatalf("%+v", sum.Attributes)
+	}
+	gauge := find(events, func(e Event) bool { return e.Attributes["metric.name"] == "payments.queue_depth" })
+	if gauge.Attributes["metric.kind"] != "gauge" || gauge.Attributes["metric.value"] != 7.5 {
+		t.Fatalf("%+v", gauge.Attributes)
+	}
+}

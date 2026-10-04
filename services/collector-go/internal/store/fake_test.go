@@ -3,17 +3,22 @@ package store
 import (
 	"context"
 	"errors"
+	"sort"
 	"testing"
 	"time"
+
+	"signalforge/collector-go/internal/canonical"
 )
 
 // Fake is an in-memory Store with ReplacingMergeTree-equivalent behavior: every incident revision is
 // kept and reads return the highest revision per incident_id; evidence keeps one row per evidence_id;
 // telemetry keeps one row per event_id. FailRead and FailWrite inject errors into the matching calls.
 type Fake struct {
-	incidents   map[string][]IncidentRow // incident_id -> every revision inserted
-	evidence    map[string]EvidenceRow   // evidence_id -> row
-	telemetry   map[string]string        // event_id -> attributes (test-only payload)
+	incidents   map[string][]IncidentRow        // incident_id -> every revision inserted
+	evidence    map[string]EvidenceRow          // evidence_id -> row
+	events      map[string]canonical.Event      // event_id -> canonical event
+	deployments map[string]canonical.Deployment // deployment_id -> canonical deployment
+	failures    []FailureRow                    // seeded by SeedFailureTraces
 	runs        []CorrelationRun
 	failRead    bool
 	failWrite   bool
@@ -24,9 +29,10 @@ var errInjected = errors.New("injected store failure")
 
 func NewFake() *Fake {
 	return &Fake{
-		incidents: map[string][]IncidentRow{},
-		evidence:  map[string]EvidenceRow{},
-		telemetry: map[string]string{},
+		incidents:   map[string][]IncidentRow{},
+		evidence:    map[string]EvidenceRow{},
+		events:      map[string]canonical.Event{},
+		deployments: map[string]canonical.Deployment{},
 	}
 }
 
@@ -36,10 +42,53 @@ func (f *Fake) FailWrite(on bool) { f.failWrite = on }
 // RowsWritten counts every row the fake accepted, across all tables.
 func (f *Fake) RowsWritten() int { return f.rowsWritten }
 
-// PutTelemetry stores one telemetry row by event ID; a second put replaces the first.
-func (f *Fake) PutTelemetry(eventID, attributes string) {
-	f.telemetry[eventID] = attributes
-	f.rowsWritten++
+// EventsWritten returns the number of distinct canonical events held (one row per event_id).
+func (f *Fake) EventsWritten() int { return len(f.events) }
+
+// DeploymentsWritten returns the number of distinct deployments held (one row per deployment_id).
+func (f *Fake) DeploymentsWritten() int { return len(f.deployments) }
+
+// SeedFailureTraces sets the failure rows FailureTraces returns.
+func (f *Fake) SeedFailureTraces(rows []FailureRow) { f.failures = append(f.failures, rows...) }
+
+// InsertEvents keeps one row per event_id. A repeated deterministic ID replaces the earlier row.
+func (f *Fake) InsertEvents(ctx context.Context, events []canonical.Event) error {
+	if f.failWrite {
+		return errInjected
+	}
+	for _, e := range events {
+		f.events[e.EventID] = e
+		f.rowsWritten++
+	}
+	return nil
+}
+
+// InsertDeployments keeps one row per deployment_id.
+func (f *Fake) InsertDeployments(ctx context.Context, deployments []canonical.Deployment) error {
+	if f.failWrite {
+		return errInjected
+	}
+	for _, d := range deployments {
+		f.deployments[d.DeploymentID] = d
+		f.rowsWritten++
+	}
+	return nil
+}
+
+// SucceededDeployments returns demo-payments deployments with status succeeded and Timestamp >= since,
+// ordered by Timestamp.
+func (f *Fake) SucceededDeployments(ctx context.Context, since time.Time) ([]canonical.Deployment, error) {
+	if f.failRead {
+		return nil, errInjected
+	}
+	var out []canonical.Deployment
+	for _, d := range f.deployments {
+		if d.Service == "demo-payments" && d.Status == "succeeded" && !d.Timestamp.Before(since) {
+			out = append(out, d)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Timestamp.Before(out[j].Timestamp) })
+	return out, nil
 }
 
 // latestRevisions returns the highest-revision row for each incident_id, ordered by incident_id.
@@ -68,7 +117,14 @@ func (f *Fake) FailureTraces(ctx context.Context, since time.Time) ([]FailureRow
 	if f.failRead {
 		return nil, errInjected
 	}
-	return nil, nil
+	var out []FailureRow
+	for _, r := range f.failures {
+		if !r.Timestamp.Before(since) {
+			out = append(out, r)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Timestamp.Before(out[j].Timestamp) })
+	return out, nil
 }
 
 func (f *Fake) IncidentsByKey(ctx context.Context, dedupKey string) ([]IncidentRow, error) {
@@ -165,6 +221,56 @@ func (f *Fake) LatestEvaluatedUntil(ctx context.Context) (time.Time, error) {
 		}
 	}
 	return latest, nil
+}
+
+func TestFakeEventsDedupeByEventID(t *testing.T) {
+	ctx := context.Background()
+	f := NewFake()
+	t0 := time.Unix(1000, 0).UTC()
+	ev := canonical.Event{EventID: "e1", SchemaVersion: "1.0", Timestamp: t0, Type: "trace", Service: "demo-payments", Severity: "info", Attributes: map[string]any{}}
+	_ = f.InsertEvents(ctx, []canonical.Event{ev, ev})
+	_ = f.InsertEvents(ctx, []canonical.Event{ev})
+	if f.EventsWritten() != 1 {
+		t.Fatalf("%d events, want 1", f.EventsWritten())
+	}
+}
+
+func TestSucceededDeploymentsFilter(t *testing.T) {
+	ctx := context.Background()
+	f := NewFake()
+	since := time.Unix(1000, 0).UTC()
+	_ = f.InsertDeployments(ctx, []canonical.Deployment{
+		{DeploymentID: "late-ok", Timestamp: since.Add(5 * time.Second), Service: "demo-payments", Status: "succeeded"},
+		{DeploymentID: "ok", Timestamp: since.Add(1 * time.Second), Service: "demo-payments", Status: "succeeded"},
+		{DeploymentID: "before", Timestamp: since.Add(-time.Second), Service: "demo-payments", Status: "succeeded"},
+		{DeploymentID: "failed", Timestamp: since.Add(2 * time.Second), Service: "demo-payments", Status: "failed"},
+		{DeploymentID: "other", Timestamp: since.Add(3 * time.Second), Service: "demo-orders", Status: "succeeded"},
+	})
+	got, err := f.SucceededDeployments(ctx, since)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].DeploymentID != "ok" || got[1].DeploymentID != "late-ok" {
+		t.Fatalf("%+v", got)
+	}
+	if f.DeploymentsWritten() != 5 {
+		t.Fatalf("%d deployments written, want 5", f.DeploymentsWritten())
+	}
+}
+
+func TestFakeWriteFailureRejectsCanonicalWrites(t *testing.T) {
+	ctx := context.Background()
+	f := NewFake()
+	f.FailWrite(true)
+	if err := f.InsertEvents(ctx, []canonical.Event{{EventID: "e2"}}); err == nil {
+		t.Fatal("expected error")
+	}
+	if err := f.InsertDeployments(ctx, []canonical.Deployment{{DeploymentID: "d2"}}); err == nil {
+		t.Fatal("expected error")
+	}
+	if f.EventsWritten() != 0 || f.DeploymentsWritten() != 0 {
+		t.Fatal("rows written despite failure")
+	}
 }
 
 var _ Store = (*Fake)(nil)

@@ -1,0 +1,25 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          { "key": "deployment.id", "value": { "stringValue": "d3b07384-d9a0-4a3e-8f4c-1a2b3c4d5e6f" } }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "spans": [
+            {
+              "traceId": "0af7651916cd43dd8448eb211c80319c",
+              "spanId": "b7ad6b7169203331",
+              "name": "POST /charge",
+              "kind": 2,
+              "startTimeUnixNano": "1790000000719000123",
+              "endTimeUnixNano": "1790000000819000123"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

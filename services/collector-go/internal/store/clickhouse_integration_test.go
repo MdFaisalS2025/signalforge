@@ -2,9 +2,12 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"testing"
 	"time"
+
+	"signalforge/collector-go/internal/canonical"
 )
 
 // integrationStore opens the live ClickHouse at CLICKHOUSE_HOST. The test is skipped when the
@@ -116,5 +119,69 @@ func TestClickHousePendingPublishedAtReadsNil(t *testing.T) {
 	}
 	if len(rows) != 1 || rows[0].Revision != 2 || rows[0].PublishedAt == nil {
 		t.Fatalf("published revision must read non-nil PublishedAt: %+v", rows)
+	}
+}
+
+// Canonical writes and reads: one event round-trips with its nanosecond timestamp and attributes, and
+// one succeeded deployment is returned by SucceededDeployments.
+func TestClickHouseCanonicalEventAndSucceededDeployment(t *testing.T) {
+	ctx := context.Background()
+	c := integrationStore(t)
+	if err := c.MigrateUp(ctx); err != nil {
+		t.Fatal(err)
+	}
+	ts := time.Date(2026, 10, 3, 12, 0, 0, 987654321, time.UTC)
+
+	ev := canonical.Event{
+		EventID: "00000000-0000-4000-8000-00000000e002", SchemaVersion: "1.0", Timestamp: ts,
+		Type: "trace", Service: "demo-payments", ServiceVersion: "0.2.0-faulty", Environment: "local",
+		DeploymentID: "00000000-0000-4000-8000-00000000d002", TraceID: "0af7651916cd43dd8448eb211c80319c",
+		SpanID: "b7ad6b7169203331", Severity: "info",
+		Attributes: map[string]any{"span.kind": "server", "http.response.status_code": float64(500)},
+	}
+	if err := c.InsertEvents(ctx, []canonical.Event{ev}); err != nil {
+		t.Fatal(err)
+	}
+	var gotTS time.Time
+	var gotAttrs string
+	if err := c.conn.QueryRow(ctx,
+		"SELECT timestamp, attributes FROM telemetry_events FINAL WHERE event_id = ?", ev.EventID,
+	).Scan(&gotTS, &gotAttrs); err != nil {
+		t.Fatal(err)
+	}
+	if !gotTS.Equal(ts) {
+		t.Fatalf("event timestamp %s, want %s", gotTS.Format(time.RFC3339Nano), ts.Format(time.RFC3339Nano))
+	}
+	var attrs map[string]any
+	if err := json.Unmarshal([]byte(gotAttrs), &attrs); err != nil {
+		t.Fatal(err)
+	}
+	if attrs["span.kind"] != "server" || attrs["http.response.status_code"] != float64(500) {
+		t.Fatalf("attributes did not round-trip: %v", attrs)
+	}
+
+	dep := canonical.Deployment{
+		DeploymentID: "00000000-0000-4000-8000-00000000d002", Timestamp: ts, Service: "demo-payments",
+		Environment: "local", NewVersion: "0.2.0-faulty", PreviousVersion: "0.1.0",
+		InitiatedBy: "integration", Status: "succeeded",
+	}
+	if err := c.InsertDeployments(ctx, []canonical.Deployment{dep}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.SucceededDeployments(ctx, ts.Add(-time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, d := range got {
+		if d.DeploymentID == dep.DeploymentID {
+			found = true
+			if !d.Timestamp.Equal(ts) || d.Status != "succeeded" {
+				t.Fatalf("deployment did not round-trip: %+v", d)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("succeeded deployment %s not returned: %+v", dep.DeploymentID, got)
 	}
 }
