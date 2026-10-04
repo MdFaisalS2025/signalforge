@@ -394,13 +394,16 @@ Test hooks, read by `internal/config` (Task 9):
 | Message topic is neither `telemetry.raw.v1` nor `deployments.v1` | `unexpected source topic <topic>` |
 | OTLP `startTimeUnixNano`, `timeUnixNano`, or `observedTimeUnixNano` is present but not an integer nanosecond string | `OTLP timestamp must be an integer nanosecond value` |
 | Deployment `timestamp` is not RFC 3339 | `deployment event timestamp must be RFC 3339` |
+| Metric `asInt` value, or histogram `count`, is present but not an integer string | `OTLP metric integer field must be an integer` |
 
 The first row of this table covers malformed JSON syntax only. Syntactically valid OTLP JSON with a
-non-integer timestamp uses the timestamp row, not `invalid JSON payload`.
+non-integer timestamp uses the timestamp row, and a non-integer metric `asInt` or histogram `count`
+uses the metric-integer row. Neither is reported as `invalid JSON payload`.
 
-Owning tests: `TestInvalidJSONIsRejected` (syntax), `TestNonIntegerOTLPTimestampsUseTimestampReason`
-(span start, log time, log observed time, and metric time in `mapping_test.go`), and
-`TestDeploymentBadTimestampUsesRatifiedReason` (deployment timestamp in `mapping_test.go`).
+Owning tests (all in `mapping_test.go`): `TestInvalidJSONIsRejected` (syntax);
+`TestNonIntegerOTLPTimestampsUseTimestampReason` (span start, log time, log observed time, and metric
+time); `TestNonIntegerMetricIntegersUseMetricIntegerReason` (sum `asInt` and histogram `count`); and
+`TestDeploymentBadTimestampUsesRatifiedReason` (deployment timestamp).
 
 Fixture tests assert these exact strings. The acceptance script asserts
 `trace_id and span_id are required for trace events` for its malformed record.

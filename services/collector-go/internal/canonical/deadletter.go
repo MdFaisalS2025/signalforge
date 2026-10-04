@@ -7,16 +7,17 @@ import (
 
 // Exact rejection reasons (spec 8.1). Fixture tests assert these strings.
 const (
-	ReasonInvalidJSON             = "invalid JSON payload"
-	ReasonOTLPTimestampInvalid    = "OTLP timestamp must be an integer nanosecond value"
-	ReasonPayloadShape            = "payload must contain exactly one of resourceSpans, resourceLogs, resourceMetrics"
-	ReasonServiceNameRequired     = "service.name resource attribute is required"
-	ReasonTraceSpanIDsRequired    = "trace_id and span_id are required for trace events"
-	ReasonLogTraceIDRequired      = "trace_id is required for log events"
-	ReasonDeploymentStatus        = "deployment event status must be succeeded"
-	ReasonDeploymentTimestampBad  = "deployment event timestamp must be RFC 3339"
-	reasonDeploymentMissingPrefix = "deployment event is missing "
-	reasonUnsupportedMetricPrefix = "unsupported metric type: "
+	ReasonInvalidJSON              = "invalid JSON payload"
+	ReasonOTLPTimestampInvalid     = "OTLP timestamp must be an integer nanosecond value"
+	ReasonOTLPMetricIntegerInvalid = "OTLP metric integer field must be an integer"
+	ReasonPayloadShape             = "payload must contain exactly one of resourceSpans, resourceLogs, resourceMetrics"
+	ReasonServiceNameRequired      = "service.name resource attribute is required"
+	ReasonTraceSpanIDsRequired     = "trace_id and span_id are required for trace events"
+	ReasonLogTraceIDRequired       = "trace_id is required for log events"
+	ReasonDeploymentStatus         = "deployment event status must be succeeded"
+	ReasonDeploymentTimestampBad   = "deployment event timestamp must be RFC 3339"
+	reasonDeploymentMissingPrefix  = "deployment event is missing "
+	reasonUnsupportedMetricPrefix  = "unsupported metric type: "
 )
 
 // DeadLetter is the telemetry.dead-letter.v1 record (contracts/events/dead_letter.schema.json).

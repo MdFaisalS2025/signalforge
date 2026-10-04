@@ -285,8 +285,10 @@ gauge, or histogram are invalid and go to the dead-letter topic.
 Rejection reasons are exact strings (plan section 8.1). Malformed JSON syntax is rejected with
 `invalid JSON payload`. Syntactically valid OTLP JSON whose `startTimeUnixNano`, `timeUnixNano`, or
 `observedTimeUnixNano` is not an integer nanosecond string is rejected with
-`OTLP timestamp must be an integer nanosecond value`. A deployment `timestamp` that is not RFC 3339 is
-rejected with `deployment event timestamp must be RFC 3339`.
+`OTLP timestamp must be an integer nanosecond value`. A metric `asInt` value, or a histogram `count`, that
+is not an integer string is rejected with `OTLP metric integer field must be an integer`. A deployment
+`timestamp` that is not RFC 3339 is rejected with `deployment event timestamp must be RFC 3339`. Valid
+JSON is never reported as `invalid JSON payload` for a malformed timestamp or metric integer.
 
 ### 7.5 Deterministic event identity
 

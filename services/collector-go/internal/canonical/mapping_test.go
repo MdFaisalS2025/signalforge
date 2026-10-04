@@ -173,6 +173,28 @@ func TestNonIntegerOTLPTimestampsUseTimestampReason(t *testing.T) {
 	}
 }
 
+// Syntactically valid OTLP JSON whose metric integer field (asInt or histogram count) is not an
+// integer string is a semantic error, not a JSON syntax error.
+func TestNonIntegerMetricIntegersUseMetricIntegerReason(t *testing.T) {
+	const want = "OTLP metric integer field must be an integer"
+	const resource = `"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"demo-payments"}}]}`
+	cases := []struct {
+		name    string
+		payload string
+	}{
+		{"sum asInt", `{"resourceMetrics":[{` + resource + `,"scopeMetrics":[{"metrics":[{"name":"m","sum":{"dataPoints":[{"timeUnixNano":"1790000000719000123","asInt":"three"}]}}]}]}]}`},
+		{"histogram count", `{"resourceMetrics":[{` + resource + `,"scopeMetrics":[{"metrics":[{"name":"m","histogram":{"dataPoints":[{"timeUnixNano":"1790000000719000123","count":"many","sum":1.5}]}}]}]}]}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, reason := MapTelemetryMessage([]byte(tc.payload))
+			if reason != want {
+				t.Fatalf("got %q, want %q", reason, want)
+			}
+		})
+	}
+}
+
 func TestDeploymentBadTimestampUsesRatifiedReason(t *testing.T) {
 	_, reason := MapDeploymentMessage([]byte(`{"schema_version":"1.0","deployment_id":"d3b07384-d9a0-4a3e-8f4c-1a2b3c4d5e6f","timestamp":"yesterday","service":"demo-payments","new_version":"v","status":"succeeded"}`))
 	if reason != "deployment event timestamp must be RFC 3339" {

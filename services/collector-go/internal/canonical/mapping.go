@@ -263,7 +263,10 @@ func mapMetric(res resource, raw json.RawMessage) ([]Event, string) {
 		attrs["metric.kind"] = kind
 		if kind == "histogram" {
 			count, err := strconv.ParseInt(dp.Count, 10, 64)
-			if err != nil || dp.Sum == nil {
+			if err != nil {
+				return nil, ReasonOTLPMetricIntegerInvalid
+			}
+			if dp.Sum == nil {
 				return nil, ReasonInvalidJSON
 			}
 			attrs["metric.count"] = float64(count)
@@ -273,7 +276,7 @@ func mapMetric(res resource, raw json.RawMessage) ([]Event, string) {
 			case dp.AsInt != nil:
 				n, err := strconv.ParseInt(*dp.AsInt, 10, 64)
 				if err != nil {
-					return nil, ReasonInvalidJSON
+					return nil, ReasonOTLPMetricIntegerInvalid
 				}
 				attrs["metric.value"] = float64(n)
 			case dp.AsDouble != nil:
