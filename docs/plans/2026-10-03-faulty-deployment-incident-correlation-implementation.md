@@ -57,8 +57,8 @@ Compose service `collector-go` replaces its placeholder.
 | Go toolchain | `go1.27.1` | `https://go.dev/VERSION?m=text` |
 | Builder image | `golang:1.27-alpine@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414` (index digest) | Docker Hub `library/golang` tag `1.27-alpine` record, `digest` field |
 | Runtime image | `scratch` (static binary, no shell, no base image) | Design choice; no pinned base needed |
-| Kafka client | `github.com/twmb/franz-go` `v1.22.1` (package `pkg/kgo`) | `proxy.golang.org` `@latest`, 2026-09-27 |
-| ClickHouse client | `github.com/ClickHouse/clickhouse-go/v2` `v2.48.0` (native protocol, port 9000) | `proxy.golang.org` `@latest` (module path escaped as `!click!house`), 2026-08-04 |
+| Kafka client | `github.com/twmb/franz-go` `v1.22.1` (package `pkg/kgo`). Added to `go.mod` in Task 7, the first task that imports it. | `proxy.golang.org` `@latest`, 2026-09-27 |
+| ClickHouse client | `github.com/ClickHouse/clickhouse-go/v2` `v2.48.0` (native protocol, port 9000). Added to `go.mod` in Task 5, the first task that imports it. | `proxy.golang.org` `@latest` (module path escaped as `!click!house`), 2026-08-04 |
 | Collector image | `otel/opentelemetry-collector-contrib:0.108.0` (unchanged) | Existing Compose |
 | Kafka exporter | `kafka` exporter, `encoding: otlp_json`, `protocol_version: 2.0.0` | Contrib v0.108.0 exporter README: `protocol_version` is required and `otlp_json` is valid for all signals. The value `2.0.0` is an explicit compatibility choice, not a documented requirement; Task 3 verifies it by live delivery. |
 | Batch processor | `batch` with `send_batch_size: 512`, `timeout: 1s` | Collector v0.108.0 batch processor README (documented defaults: `send_batch_size` 8192, `timeout` 200ms) |
@@ -141,8 +141,10 @@ Created files are marked **new**; changed files are marked **change**.
 | `.env.example` | change | 2, 9 | Documents deployment variables (2) and test hooks (9). |
 | `observability/otel-collector/config.yaml` | change | 3 | Batch, queue, retry, kafka exporter. |
 | `scripts/rpk-consume-bounded.mjs` | new | 3 | Runs `rpk topic consume` under a 5-second kill timer (bounded reads for Tasks 3, 11, 12). |
-| `services/collector-go/go.mod`, `go.sum` | new | 4 | Module definition with pinned dependencies. |
-| `services/collector-go/Dockerfile` | new | 4 | Multi-stage build: pinned Go builder, `scratch` runtime. |
+| `services/collector-go/go.mod` | new | 4 | Module definition: `module signalforge/collector-go`, `go 1.27`, no requirements in Task 4. Gains the ClickHouse requirement in Task 5 and the franz-go requirement in Task 7. |
+| `services/collector-go/go.sum` | new | 5 | Checksums, created by `go mod tidy` when clickhouse-go is first imported. Extended in Task 7. Not present before Task 5. |
+| `services/collector-go/Dockerfile` | new | 4 | Multi-stage build: pinned Go builder, `scratch` runtime. Task 4 copies only `go.mod` before download. |
+| `services/collector-go/Dockerfile` | change | 5 | Copies `go.mod go.sum` before `go mod download`, once `go.sum` exists. |
 | `services/collector-go/.dockerignore` | new | 4 | Excludes `bin/`, `*.md`, and tests from the build context. |
 | `services/collector-go/cmd/collector-go/main.go` | new (stub in 4), change (9) | 4, 9 | Process entry: config, migrations, three loops. |
 | `services/collector-go/internal/config/config.go`, `config_test.go` | new | 4, 9 | Environment loading with exact errors, including test hooks (9). |
@@ -159,7 +161,7 @@ Created files are marked **new**; changed files are marked **change**.
 | `services/collector-go/internal/canonical/testdata/*.json` | new | 6 | Fixtures for mapping. |
 | `services/collector-go/internal/ingest/backoff.go`, `backoff_test.go` | new | 7 | Retry schedule. |
 | `services/collector-go/internal/ingest/normalizer.go`, `normalizer_test.go` | new | 7 | Batch processing, commits, dead letters. |
-| `services/collector-go/internal/ingest/kafka.go` | new | 7 | franz-go consumer and producer adapters. |
+| `services/collector-go/internal/ingest/kafka.go` | new | 7 | franz-go consumer and producer adapters. Its import adds the franz-go requirement to `go.mod` and `go.sum` (Task 7). |
 | `services/collector-go/internal/correlate/rule.go`, `rule_test.go` | new | 8 | Detection rule (spec 10.1). |
 | `services/collector-go/internal/correlate/dedup.go`, `dedup_test.go` | new | 8 | Dedup and identities (spec 11). |
 | `services/collector-go/internal/correlate/correlator.go`, `correlator_test.go` | new | 8 | Cycle, incident creation (pending), evidence repair (spec 10.2, 12.1, 12.2). |
@@ -785,7 +787,7 @@ git commit -m "feat(observability): export telemetry to Redpanda with batching, 
 
 **Depends on:** Task 3. **Spec:** 16.
 
-**Files:** `services/collector-go/go.mod`, `go.sum`, `Dockerfile`, `.dockerignore`,
+**Files:** `services/collector-go/go.mod`, `Dockerfile`, `.dockerignore`,
 `cmd/collector-go/main.go` (stub), `internal/config/config.go`, `internal/config/config_test.go`
 (config fields for the core connection only; the test hooks are added in Task 9),
 `scripts/go-in-docker.mjs` (all new), `.gitignore` (change).
@@ -811,17 +813,19 @@ node scripts/go-in-docker.mjs go version
   yields `networkArgs = ['--network','n']`, `envArgs = ['-e','A=1']`, `goArgs = ['go','test','./...']`,
   and that an unknown leading flag throws. RED: `Cannot find module`. GREEN: implement.
 
-**Module and dependencies (run through the wrapper):**
+**Module (run through the wrapper):**
 
 ```
 node scripts/go-in-docker.mjs go mod init signalforge/collector-go
-node scripts/go-in-docker.mjs go get github.com/twmb/franz-go/pkg/kgo@v1.22.1
-node scripts/go-in-docker.mjs go get github.com/ClickHouse/clickhouse-go/v2@v2.48.0
-node scripts/go-in-docker.mjs go mod tidy
 ```
 
-`go.mod` must declare `go 1.27`, require both modules at the listed versions, and carry the
-transitive requirements recorded by `go mod tidy`.
+If `go mod init` writes a patch version in its `go` directive, edit that line by hand to exactly
+`go 1.27`. The finished `go.mod` contains `module signalforge/collector-go`, the directive `go 1.27`,
+and no `require` block.
+
+No dependency is installed in this task. The module imports no external package, so `go.sum` is not
+created and no `go get` or `go mod tidy` runs here. Each dependency is added by the first task that
+imports it: clickhouse-go in Task 5, and franz-go in Task 7 (sections 3 and 9 name each step).
 
 **GREEN, core config.** `internal/config/config.go`:
 
@@ -872,7 +876,7 @@ node scripts/go-in-docker.mjs go test ./internal/config/...
 ```dockerfile
 FROM golang:1.27-alpine@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS builder
 WORKDIR /src
-COPY go.mod go.sum ./
+COPY go.mod ./
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/collector-go ./cmd/collector-go
@@ -898,7 +902,7 @@ docker build -t signalforge-collector-go:task4 services/collector-go
 **Staged files:**
 
 ```
-git add services/collector-go/go.mod services/collector-go/go.sum services/collector-go/Dockerfile services/collector-go/.dockerignore
+git add services/collector-go/go.mod services/collector-go/Dockerfile services/collector-go/.dockerignore
 git add services/collector-go/cmd/collector-go/main.go services/collector-go/internal/config
 git add scripts/go-in-docker.mjs scripts/go-in-docker.test.mjs .gitignore
 git diff --cached --check
@@ -911,6 +915,25 @@ git commit -m "build(collector-go): add Docker-only Go workflow with pinned tool
 ### Task 5 — ClickHouse schema, idempotent migrations, and store
 
 **Depends on:** Task 4. **Spec:** 9, 12.4.
+
+**Dependency (first import of clickhouse-go).** `clickhouse.go` is the first file in the module to
+import `github.com/ClickHouse/clickhouse-go/v2`. Once that file exists, run, in this order:
+
+```
+node scripts/go-in-docker.mjs go get github.com/ClickHouse/clickhouse-go/v2@v2.48.0
+node scripts/go-in-docker.mjs go mod tidy
+```
+
+Expected: `go.mod` requires `github.com/ClickHouse/clickhouse-go/v2 v2.48.0`, and `go.sum` is created.
+In the same change, `services/collector-go/Dockerfile` copies `go.mod go.sum` before
+`RUN go mod download`, so the module download layer depends on the checksum file. Do not run these
+commands before `clickhouse.go` imports the package. Running `go get` earlier would add an unused
+requirement that `go mod tidy` removes.
+
+`clickhouse.go` is in the same `store` package as the migration helpers and the fake store, so any test
+run of `./internal/store/...` compiles it. The RED run of `migrate_test.go` (before any production
+file exists) needs no dependency. Every run after `clickhouse.go` is written must come after the two
+commands above.
 
 **Files (new):** `internal/store/store.go`, `internal/store/migrate.go`,
 `internal/store/migrate_test.go`, `internal/store/migrations/0001_correlation_schema.sql`,
@@ -1049,7 +1072,7 @@ node scripts/go-in-docker.mjs go test ./internal/store/... -run 'TestSplitStatem
 **Staged files:**
 
 ```
-git add services/collector-go/internal/store services/collector-go/go.mod services/collector-go/go.sum
+git add services/collector-go/internal/store services/collector-go/go.mod services/collector-go/go.sum services/collector-go/Dockerfile
 git diff --cached --check
 git diff --cached --stat
 git commit -m "feat(collector-go): add idempotent ClickHouse schema and revisioned store"
@@ -1171,6 +1194,21 @@ git commit -m "feat(collector-go): map OTLP JSON to canonical events with UUIDv5
 
 **Depends on:** Tasks 5, 6. **Spec:** 7.6, 8.3.
 
+**Dependency (first import of franz-go).** `kafka.go` is the first file in the module to import
+`github.com/twmb/franz-go/pkg/kgo`. It is in the same `ingest` package as `normalizer.go` and
+`backoff.go`, so any test run of `./internal/ingest/...` compiles it. Once `kafka.go` is written, and
+before the first ingest test run, run, in this order:
+
+```
+node scripts/go-in-docker.mjs go get github.com/twmb/franz-go/pkg/kgo@v1.22.1
+node scripts/go-in-docker.mjs go mod tidy
+```
+
+Expected: `go.mod` gains `github.com/twmb/franz-go v1.22.1`, and `go.sum` gains its checksums. Its
+transitive requirements are recorded by `go mod tidy`. The backoff RED run needs no dependency. The
+normalizer tests use only the in-memory fakes, but they still compile `kafka.go`, so they also run
+after these commands.
+
 **Files (new):** `internal/ingest/backoff.go`, `backoff_test.go`, `normalizer.go`,
 `normalizer_test.go`, `kafka.go`.
 
@@ -1269,7 +1307,7 @@ Expected RED: `undefined: Normalizer`. GREEN: `ProcessBatch` does the following:
 **Staged files:**
 
 ```
-git add services/collector-go/internal/ingest
+git add services/collector-go/internal/ingest services/collector-go/go.mod services/collector-go/go.sum
 git diff --cached --check
 git diff --cached --stat
 git commit -m "feat(collector-go): normalize telemetry with dead letters and at-least-once commits"
@@ -1947,6 +1985,11 @@ git commit -m "docs: document faulty-deployment incident correlation and record 
 
 - **Spec coverage:** every row of spec sections 6–18 maps to a task and a test in section 10,
   including the new publication requirements (12.4) and the order-to-trace identity (7.2, A4).
+- **Dependency timeline:** Task 4 creates `go.mod` with `module signalforge/collector-go` and `go 1.27`
+  and no requirements. No `go.sum` exists until Task 5, which adds clickhouse-go v2.48.0 at its first import
+  and copies `go.sum` in the Dockerfile. Task 7 adds franz-go v1.22.1 at its first import. The dependency
+  commands appear only in those two tasks, and no earlier task's file list or staging list includes a
+  requirement it does not yet use.
 - **Task count:** the plan has twelve tasks: contract, Payments, Collector and Redpanda, Go workflow,
   store, canonical mapping, normalizer, correlator and publisher, wiring, deployment script, acceptance
   script, and documentation and final validation.
