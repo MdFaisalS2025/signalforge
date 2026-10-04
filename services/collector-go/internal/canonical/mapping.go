@@ -125,7 +125,7 @@ func mapSpans(raw json.RawMessage) ([]Event, string) {
 				}
 				start, err := parseUnixNano(span.StartTimeUnixNano)
 				if err != nil {
-					return nil, ReasonInvalidJSON
+					return nil, ReasonOTLPTimestampInvalid
 				}
 				attrs, err := flattenAttributes(span.Attributes)
 				if err != nil {
@@ -170,7 +170,7 @@ func mapLogs(raw json.RawMessage) ([]Event, string) {
 				}
 				ns, err := parseUnixNano(nanos)
 				if err != nil {
-					return nil, ReasonInvalidJSON
+					return nil, ReasonOTLPTimestampInvalid
 				}
 				attrs, err := flattenAttributes(record.Attributes)
 				if err != nil {
@@ -251,7 +251,7 @@ func mapMetric(res resource, raw json.RawMessage) ([]Event, string) {
 	for _, dp := range body.DataPoints {
 		ns, err := parseUnixNano(dp.TimeUnixNano)
 		if err != nil {
-			return nil, ReasonInvalidJSON
+			return nil, ReasonOTLPTimestampInvalid
 		}
 		attrs, err := flattenAttributes(dp.Attributes)
 		if err != nil {

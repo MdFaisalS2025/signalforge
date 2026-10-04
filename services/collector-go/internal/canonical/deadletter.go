@@ -8,6 +8,7 @@ import (
 // Exact rejection reasons (spec 8.1). Fixture tests assert these strings.
 const (
 	ReasonInvalidJSON             = "invalid JSON payload"
+	ReasonOTLPTimestampInvalid    = "OTLP timestamp must be an integer nanosecond value"
 	ReasonPayloadShape            = "payload must contain exactly one of resourceSpans, resourceLogs, resourceMetrics"
 	ReasonServiceNameRequired     = "service.name resource attribute is required"
 	ReasonTraceSpanIDsRequired    = "trace_id and span_id are required for trace events"

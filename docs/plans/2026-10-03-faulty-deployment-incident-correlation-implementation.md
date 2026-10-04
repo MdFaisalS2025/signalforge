@@ -392,6 +392,15 @@ Test hooks, read by `internal/config` (Task 9):
 | Deployment payload is missing a required field | `deployment event is missing <field>` |
 | Deployment `status` is not `succeeded` | `deployment event status must be succeeded` |
 | Message topic is neither `telemetry.raw.v1` nor `deployments.v1` | `unexpected source topic <topic>` |
+| OTLP `startTimeUnixNano`, `timeUnixNano`, or `observedTimeUnixNano` is present but not an integer nanosecond string | `OTLP timestamp must be an integer nanosecond value` |
+| Deployment `timestamp` is not RFC 3339 | `deployment event timestamp must be RFC 3339` |
+
+The first row of this table covers malformed JSON syntax only. Syntactically valid OTLP JSON with a
+non-integer timestamp uses the timestamp row, not `invalid JSON payload`.
+
+Owning tests: `TestInvalidJSONIsRejected` (syntax), `TestNonIntegerOTLPTimestampsUseTimestampReason`
+(span start, log time, log observed time, and metric time in `mapping_test.go`), and
+`TestDeploymentBadTimestampUsesRatifiedReason` (deployment timestamp in `mapping_test.go`).
 
 Fixture tests assert these exact strings. The acceptance script asserts
 `trace_id and span_id are required for trace events` for its malformed record.

@@ -282,6 +282,12 @@ Per signal:
 Unsupported top-level keys, a missing `service.name`, and metric types other than sum,
 gauge, or histogram are invalid and go to the dead-letter topic.
 
+Rejection reasons are exact strings (plan section 8.1). Malformed JSON syntax is rejected with
+`invalid JSON payload`. Syntactically valid OTLP JSON whose `startTimeUnixNano`, `timeUnixNano`, or
+`observedTimeUnixNano` is not an integer nanosecond string is rejected with
+`OTLP timestamp must be an integer nanosecond value`. A deployment `timestamp` that is not RFC 3339 is
+rejected with `deployment event timestamp must be RFC 3339`.
+
 ### 7.5 Deterministic event identity
 
 Every canonical record gets `event_id = UUIDv5(NAMESPACE, key)`, where

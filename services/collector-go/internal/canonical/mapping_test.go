@@ -148,6 +148,38 @@ func TestMetricEventIDUsesPlannedKey(t *testing.T) {
 	}
 }
 
+// Syntactically valid OTLP JSON whose timestamp field is not an integer nanosecond string is a
+// semantic error, not a JSON syntax error.
+func TestNonIntegerOTLPTimestampsUseTimestampReason(t *testing.T) {
+	const want = "OTLP timestamp must be an integer nanosecond value"
+	const resource = `"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"demo-payments"}}]}`
+	const ids = `"traceId":"0af7651916cd43dd8448eb211c80319c","spanId":"b7ad6b7169203331"`
+	cases := []struct {
+		name    string
+		payload string
+	}{
+		{"span startTimeUnixNano", `{"resourceSpans":[{` + resource + `,"scopeSpans":[{"spans":[{` + ids + `,"startTimeUnixNano":"not-a-number"}]}]}]}`},
+		{"log timeUnixNano", `{"resourceLogs":[{` + resource + `,"scopeLogs":[{"logRecords":[{` + ids + `,"timeUnixNano":"1.5"}]}]}]}`},
+		{"log observedTimeUnixNano", `{"resourceLogs":[{` + resource + `,"scopeLogs":[{"logRecords":[{` + ids + `,"timeUnixNano":"","observedTimeUnixNano":"xyz"}]}]}]}`},
+		{"metric timeUnixNano", `{"resourceMetrics":[{` + resource + `,"scopeMetrics":[{"metrics":[{"name":"m","gauge":{"dataPoints":[{"timeUnixNano":"soon","asDouble":1}]}}]}]}]}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, reason := MapTelemetryMessage([]byte(tc.payload))
+			if reason != want {
+				t.Fatalf("got %q, want %q", reason, want)
+			}
+		})
+	}
+}
+
+func TestDeploymentBadTimestampUsesRatifiedReason(t *testing.T) {
+	_, reason := MapDeploymentMessage([]byte(`{"schema_version":"1.0","deployment_id":"d3b07384-d9a0-4a3e-8f4c-1a2b3c4d5e6f","timestamp":"yesterday","service":"demo-payments","new_version":"v","status":"succeeded"}`))
+	if reason != "deployment event timestamp must be RFC 3339" {
+		t.Fatalf("got %q", reason)
+	}
+}
+
 func TestMetricValuesAndKinds(t *testing.T) {
 	events, _ := MapTelemetryMessage(load(t, "metrics.json"))
 	sum := find(events, func(e Event) bool { return e.Attributes["metric.name"] == "payments.charges" })
