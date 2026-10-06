@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<!--
+  Read-only account for the incident dashboard (docs/specs/2026-10-06-incident-dashboard.md, section 6.2).
+  Local development only. The password is the existing local convention, and no other account changes.
+-->
+<clickhouse>
+  <profiles>
+    <dashboard_readonly>
+      <readonly>1</readonly>
+    </dashboard_readonly>
+  </profiles>
+  <users>
+    <dashboard_reader>
+      <password>changeme-local-only</password>
+      <networks>
+        <ip>::/0</ip>
+      </networks>
+      <profile>dashboard_readonly</profile>
+      <quota>default</quota>
+      <allow_databases>
+        <database>signalforge</database>
+      </allow_databases>
+    </dashboard_reader>
+  </users>
+</clickhouse>

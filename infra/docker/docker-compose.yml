@@ -46,6 +46,7 @@ services:
       - "9000:9000"
     volumes:
       - clickhouse-data:/var/lib/clickhouse
+      - ../clickhouse/users.d/dashboard-reader.xml:/etc/clickhouse-server/users.d/dashboard-reader.xml:ro
     healthcheck:
       test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
       interval: 2s
