@@ -1,0 +1,22 @@
+/* Design tokens from docs/specs/2026-10-06-incident-dashboard.md, section 4. */
+:root {
+  --bg: #0f1216;
+  --surface: #161b22;
+  --hairline: #222a33;
+  --text: #d6dde6;
+  --muted: #8492a0;
+  --high: #f0b429;
+  --faulty: #ff5c5c;
+  --healthy: #3ddc97;
+  --focus: #6aa9ff;
+  color-scheme: dark;
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 13px;
+}
