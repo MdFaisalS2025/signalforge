@@ -4,11 +4,12 @@ AI incident response and observability platform: turns raw operational telemetry
 into evidence-linked incident diagnoses and safe, human-approved remediation
 workflows.
 
-**Status: Orders → Payments observability slice implemented.** Two demo services
-(`demo-orders`, `demo-payments`) run in Docker Compose and export traces, metrics,
-and logs over OTLP/HTTP to the OpenTelemetry Collector. The rest of the platform
-(incident correlation, the agent, the dashboard, and remediation) is still
-placeholder scaffolding. The overall plan is in
+**Status: Orders → Payments observability slice and the faulty-deployment incident-correlation
+slice implemented.** Two demo services (`demo-orders`, `demo-payments`) run in Docker Compose and
+export traces, metrics, and logs over OTLP/HTTP to the OpenTelemetry Collector. A faulty payments
+deployment now produces one persisted, evidence-linked incident (see
+[Faulty deployment incident correlation](#faulty-deployment-incident-correlation)). The agent, the
+dashboard, and remediation are still placeholder scaffolding. The overall plan is in
 [`SignalForge_Project_Plan.docx`](SignalForge_Project_Plan.docx).
 
 ## Problem and user workflow
@@ -220,6 +221,81 @@ Restore the service and wait for it to become healthy:
 docker compose -f infra/docker/docker-compose.yml start demo-payments
 docker compose -f infra/docker/docker-compose.yml ps
 ```
+
+## Faulty deployment incident correlation
+
+This slice runs a faulty `demo-payments` deployment and produces one incident linked to its evidence.
+The pipeline is demo services → OpenTelemetry Collector → Redpanda (`telemetry.raw.v1`) → Go normalizer
+(`collector-go`) → ClickHouse → Go correlator and publisher (`collector-go`) → Redpanda
+(`incidents.created.v1`). The decision and its limits are recorded in
+[ADR 0004](docs/decisions/0004-faulty-deployment-correlation.md).
+
+Start the slice:
+
+```bash
+docker compose -f infra/docker/docker-compose.yml up -d --build redpanda redpanda-init clickhouse otel-collector collector-go demo-orders demo-payments
+```
+
+Deploy a faulty version. This recreates `demo-payments` with fault mode enabled, waits until it is
+healthy, and publishes a succeeded event to `deployments.v1`. It prints `deployment_id=<uuid>`:
+
+```bash
+node scripts/deploy-payments.mjs --version 0.2.0-faulty --fault enabled
+```
+
+Run the acceptance check. It deploys faulty versions, sends orders, and checks ClickHouse and Kafka. It
+prints the deployment and incident IDs and `PASS`, and it restores `demo-payments` to version `0.1.0` when
+it finishes:
+
+```bash
+node scripts/verify-faulty-deployment-incident.mjs
+```
+
+Go runs only through Docker. No Go toolchain is needed on the host:
+
+```bash
+node scripts/go-in-docker.mjs go test ./...
+```
+
+### Topics
+
+| Topic | Produced by | Consumed by |
+|---|---|---|
+| `telemetry.raw.v1` | OpenTelemetry Collector (OTLP/JSON) | `collector-go` normalizer |
+| `deployments.v1` | `scripts/deploy-payments.mjs` | `collector-go` normalizer |
+| `telemetry.dead-letter.v1` | `collector-go` normalizer, for invalid or unexpected records | Nothing in this slice |
+| `incidents.created.v1` | `collector-go` publisher, keyed by `incident_id` | Nothing in this slice; the acceptance script reads it |
+
+### Acceptance-only hooks
+
+Two environment variables exist only for the acceptance script. Both default to off, and the
+Compose file reads them from `.env` (see `.env.example`). Setting either one makes `collector-go`
+fail on purpose, so leave both at `0` for normal use.
+
+- `INCIDENT_PUBLISH_FAIL_ATTEMPTS` (default `0`): the first N attempted incident publications fail
+  before Kafka is called.
+- `INCIDENT_CRASH_AFTER_PRODUCE` (default `0`; `1` enables it): the process exits after a successful
+  incident produce and before it records the incident as published.
+
+### Delivery guarantee
+
+- Each incident is persisted once. There is exactly one latest incident for a burst, with exactly four
+  evidence rows: one for the deployment and one for each of the three triggering traces.
+- Incident messages are delivered at least once. A crash after a successful produce can publish the same
+  message again after restart, with the same `incident_id` as its key. Consumers must tolerate that
+  duplicate.
+- On the healthy path, one message is produced per incident.
+
+### Limits
+
+- A single `collector-go` instance is supported. Two instances would both evaluate the same windows.
+- Nothing is retained or expired. ClickHouse tables and Redpanda topics grow without limit.
+- The Compose file publishes Redpanda's Kafka port `9092` to the host. This is a local-development
+  exposure, not a production setting.
+- No consumer acts on `incidents.created.v1` in this slice.
+- The 30-second burst window and the five-minute windows assume the containers share a clock.
+- This is a local demo. It has no authentication, TLS, backups, or monitoring, and it is not a cloud
+  or production deployment. Exactly-once Kafka delivery is not claimed.
 
 ## Scope and limits
 
