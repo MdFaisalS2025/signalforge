@@ -67,7 +67,15 @@ test('one or more failure traces make a deployment faulty, with the count in the
 test('a linked incident makes a deployment faulty even when the failure count is zero', () => {
   const result = classifyDeployment({ status: 'succeeded', failingTraces: 0, incidentCount: 1 });
   assert.equal(result.class, 'faulty');
-  assert.equal(result.label, 'Linked to an incident');
+  assert.equal(result.label, 'Faulty: 0 HTTP 500 traces');
+});
+
+test('a linked incident with zero counted failures is faulty, labelled with the specified form', () => {
+  // Spec 5.3 defines one label form for every faulty deployment: "Faulty: N HTTP 500 traces".
+  assert.deepEqual(classifyDeployment({ status: 'succeeded', failingTraces: 0, incidentCount: 1 }), {
+    class: 'faulty',
+    label: 'Faulty: 0 HTTP 500 traces',
+  });
 });
 
 test('a non-succeeded status is unknown and keeps its raw status as the label', () => {

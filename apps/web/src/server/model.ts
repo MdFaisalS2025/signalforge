@@ -93,11 +93,9 @@ export function classifyDeployment(input: {
   if (input.status !== 'succeeded') {
     return { class: 'unknown', label: input.status };
   }
-  if (input.failingTraces > 0) {
+  // A linked incident is faulty even when no failures are counted. The label keeps the one specified form.
+  if (input.failingTraces > 0 || input.incidentCount > 0) {
     return { class: 'faulty', label: `Faulty: ${input.failingTraces} HTTP 500 traces` };
-  }
-  if (input.incidentCount > 0) {
-    return { class: 'faulty', label: 'Linked to an incident' };
   }
   return { class: 'healthy', label: 'No failures observed' };
 }
