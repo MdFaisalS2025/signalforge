@@ -85,26 +85,26 @@ func (s *fakeStore) InsertDeployments(ctx context.Context, d []canonical.Deploym
 	return nil
 }
 
-func (s *fakeStore) SucceededDeployments(ctx context.Context, since time.Time) ([]canonical.Deployment, error) {
+func (s *fakeStore) SucceededDeployments(ctx context.Context, since, until time.Time) ([]canonical.Deployment, error) {
 	if s.failRead {
 		return nil, errRead
 	}
 	var out []canonical.Deployment
 	for _, d := range s.deployments {
-		if d.Service == "demo-payments" && d.Status == "succeeded" && !d.Timestamp.Before(since) {
+		if d.Service == "demo-payments" && d.Status == "succeeded" && !d.Timestamp.Before(since) && !d.Timestamp.After(until) {
 			out = append(out, d)
 		}
 	}
 	return out, nil
 }
 
-func (s *fakeStore) FailureTraces(ctx context.Context, since time.Time) ([]store.FailureRow, error) {
+func (s *fakeStore) FailureTraces(ctx context.Context, since, until time.Time) ([]store.FailureRow, error) {
 	if s.failRead {
 		return nil, errRead
 	}
 	var out []store.FailureRow
 	for _, r := range s.failures {
-		if !r.Timestamp.Before(since) {
+		if !r.Timestamp.Before(since) && !r.Timestamp.After(until) {
 			out = append(out, r)
 		}
 	}
@@ -391,6 +391,32 @@ func TestCorrelatorLogsCreatedRepairedAndSuppressedEvents(t *testing.T) {
 	if !strings.Contains(suppressedBuf.String(), `"msg":"incident suppressed"`) ||
 		strings.Contains(suppressedBuf.String(), `"msg":"incident created"`) {
 		t.Fatalf("suppression event wrong: %s", suppressedBuf.String())
+	}
+}
+
+// Future-dated deployments and failures are not evaluated in a cycle that runs before their event time. No
+// incident is created from them, and correlation progress never moves past the cycle's now.
+func TestFutureDatedRecordsAreExcludedFromTheCycle(t *testing.T) {
+	s := newFakeStore()
+	now := t0.Add(time.Minute)
+	future := canonical.Deployment{DeploymentID: "D9", Timestamp: now.Add(5 * time.Second), Service: "demo-payments", Environment: "local", Status: "succeeded"}
+	s.deployments = append(s.deployments, future)
+	s.failures = append(s.failures,
+		store.FailureRow{TraceID: "fa", DeploymentID: "D9", Service: "demo-payments", Timestamp: now.Add(10 * time.Second)},
+		store.FailureRow{TraceID: "fb", DeploymentID: "D9", Service: "demo-payments", Timestamp: now.Add(20 * time.Second)},
+		store.FailureRow{TraceID: "fc", DeploymentID: "D9", Service: "demo-payments", Timestamp: now.Add(30 * time.Second)},
+	)
+	c := &Correlator{Store: s, Now: fixed(now)}
+	if err := c.RunCycle(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	rows, _ := s.IncidentsByKey(ctx, DedupKey("local", "demo-payments", "D9", TriggerRule))
+	if len(rows) != 0 {
+		t.Fatalf("future-dated burst created an incident: %+v", rows)
+	}
+	until, _ := s.LatestEvaluatedUntil(ctx)
+	if until.After(now) {
+		t.Fatalf("correlation progress %v moved past now %v", until, now)
 	}
 }
 

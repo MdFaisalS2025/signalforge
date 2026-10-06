@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -306,49 +307,84 @@ func unsupportedMetricName(fields map[string]json.RawMessage) string {
 }
 
 // MapDeploymentMessage maps one deployments.v1 message to a Deployment, or returns a reason.
+// deploymentFieldOrder lists every field deployment_event.schema.json allows, in a fixed order.
+var deploymentFieldOrder = []string{
+	"schema_version", "deployment_id", "timestamp", "service", "environment",
+	"previous_version", "new_version", "initiated_by", "status",
+}
+
+// deploymentRequired lists the fields the schema requires, in the order the reasons are reported.
+var deploymentRequired = []string{"schema_version", "deployment_id", "timestamp", "service", "new_version", "status"}
+
+var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// MapDeploymentMessage maps one deployments.v1 message to a Deployment, or returns a reason. The payload
+// is checked against deployment_event.schema.json before it can reach ClickHouse, so a bad value becomes a
+// dead letter instead of a write that keeps failing.
 func MapDeploymentMessage(payload []byte) (Deployment, string) {
-	var m struct {
-		DeploymentID    string `json:"deployment_id"`
-		Timestamp       string `json:"timestamp"`
-		Service         string `json:"service"`
-		Environment     string `json:"environment"`
-		PreviousVersion string `json:"previous_version"`
-		NewVersion      string `json:"new_version"`
-		InitiatedBy     string `json:"initiated_by"`
-		Status          string `json:"status"`
-	}
-	if err := json.Unmarshal(payload, &m); err != nil {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &raw); err != nil || raw == nil {
 		return Deployment{}, ReasonInvalidJSON
 	}
-	required := []struct{ field, value string }{
-		{"deployment_id", m.DeploymentID},
-		{"timestamp", m.Timestamp},
-		{"service", m.Service},
-		{"new_version", m.NewVersion},
-		{"status", m.Status},
-	}
-	for _, f := range required {
-		if f.value == "" {
-			return Deployment{}, reasonDeploymentMissingPrefix + f.field
+	var unexpected []string
+	for key := range raw {
+		if !contains(deploymentFieldOrder, key) {
+			unexpected = append(unexpected, key)
 		}
 	}
-	ts, err := time.Parse(time.RFC3339Nano, m.Timestamp)
+	if len(unexpected) > 0 {
+		sort.Strings(unexpected)
+		return Deployment{}, reasonDeploymentUnexpectedPrefix + unexpected[0]
+	}
+	values := map[string]string{}
+	for _, field := range deploymentFieldOrder {
+		v, ok := raw[field]
+		if !ok {
+			continue
+		}
+		var s string
+		if err := json.Unmarshal(v, &s); err != nil {
+			return Deployment{}, reasonDeploymentStringPrefix + field + " must be a string"
+		}
+		values[field] = s
+	}
+	for _, field := range deploymentRequired {
+		if values[field] == "" {
+			return Deployment{}, reasonDeploymentMissingPrefix + field
+		}
+	}
+	if values["schema_version"] != "1.0" {
+		return Deployment{}, ReasonDeploymentSchemaVersion
+	}
+	if !uuidPattern.MatchString(values["deployment_id"]) {
+		return Deployment{}, ReasonDeploymentIDInvalid
+	}
+	ts, err := time.Parse(time.RFC3339Nano, values["timestamp"])
 	if err != nil {
 		return Deployment{}, ReasonDeploymentTimestampBad
 	}
-	if m.Status != "succeeded" {
+	if values["status"] != "succeeded" {
 		return Deployment{}, ReasonDeploymentStatus
 	}
 	return Deployment{
-		DeploymentID:    m.DeploymentID,
+		DeploymentID:    values["deployment_id"],
 		Timestamp:       ts.UTC(),
-		Service:         m.Service,
-		Environment:     m.Environment,
-		NewVersion:      m.NewVersion,
-		PreviousVersion: m.PreviousVersion,
-		InitiatedBy:     m.InitiatedBy,
-		Status:          m.Status,
+		Service:         values["service"],
+		Environment:     values["environment"],
+		NewVersion:      values["new_version"],
+		PreviousVersion: values["previous_version"],
+		InitiatedBy:     values["initiated_by"],
+		Status:          values["status"],
 	}, ""
+}
+
+func contains(list []string, value string) bool {
+	for _, item := range list {
+		if item == value {
+			return true
+		}
+	}
+	return false
 }
 
 // parseUnixNano reads an OTLP JSON nanosecond string. An empty string is zero.

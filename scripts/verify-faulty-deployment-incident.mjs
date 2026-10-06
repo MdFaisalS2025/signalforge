@@ -32,40 +32,67 @@ const CONTAINER_WAIT = { intervalMs: 1000, timeoutMs: 60_000 };
 
 // ---- process helpers -------------------------------------------------------------------------------------
 
-// Runs a command with an argument array, no shell, and a hidden window.
-function run(command, args, { env = process.env, input } = {}) {
+const DEFAULT_CHILD_TIMEOUT_MS = 120_000;
+
+// Runs a command with an argument array, no shell, and a hidden window. A child that outlives timeoutMs is
+// killed, and the result has code -1 and a timeout diagnostic in stderr.
+export function run(command, args, { env = process.env, input, timeoutMs = DEFAULT_CHILD_TIMEOUT_MS } = {}) {
   return new Promise((resolve) => {
     const child = spawn(command, args, { env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
+    let settled = false;
+    let timer;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    timer = setTimeout(() => {
+      child.kill();
+      finish({ code: -1, stdout, stderr: `${stderr}timed out after ${timeoutMs}ms: ${command} ${args.join(' ')}` });
+    }, timeoutMs);
     child.stdout.on('data', (chunk) => { stdout += chunk; });
     child.stderr.on('data', (chunk) => { stderr += chunk; });
-    child.on('error', (err) => resolve({ code: -1, stdout, stderr: stderr + err.message }));
-    child.on('close', (code) => resolve({ code, stdout, stderr }));
+    child.on('error', (err) => finish({ code: -1, stdout, stderr: stderr + err.message }));
+    child.on('close', (code) => finish({ code, stdout, stderr }));
     child.stdin.on('error', () => {});
     child.stdin.end(input ?? '');
   });
 }
 
 // compose runs a Docker Compose command for the stack and returns { code, stdout, stderr }.
-export function compose(args, { env, input } = {}) {
-  return run('docker', ['compose', '-f', COMPOSE_FILE, ...args], { env, input });
+export function compose(args, { env, input, timeoutMs } = {}) {
+  return run('docker', ['compose', '-f', COMPOSE_FILE, ...args], { env, input, timeoutMs });
 }
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// pollUntil repeatedly calls check until it returns a truthy value. It throws after timeoutMs.
+const TIMED_OUT = Symbol('timed out');
+
+// pollUntil repeatedly calls check(remainingMs) until it returns a truthy value, and throws after timeoutMs.
+// Each check races the time that remains, so a check that never settles cannot extend the overall deadline.
 export async function pollUntil(check, { intervalMs = 500, timeoutMs, what = 'condition' } = {}) {
   const deadline = Date.now() + timeoutMs;
+  const timeoutError = () => new Error(`Timed out after ${timeoutMs}ms waiting for: ${what}`);
   for (;;) {
-    const value = await check();
-    if (value) return value;
-    if (Date.now() >= deadline) {
-      throw new Error(`Timed out after ${timeoutMs}ms waiting for: ${what}`);
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw timeoutError();
+    let timer;
+    const expired = new Promise((resolve) => { timer = setTimeout(() => resolve(TIMED_OUT), remaining); });
+    let value;
+    try {
+      value = await Promise.race([check(remaining), expired]);
+    } finally {
+      clearTimeout(timer);
     }
-    await delay(intervalMs);
+    if (value === TIMED_OUT) throw timeoutError();
+    if (value) return value;
+    if (Date.now() >= deadline) throw timeoutError();
+    await delay(Math.min(intervalMs, deadline - Date.now()));
   }
 }
 
@@ -206,7 +233,7 @@ export async function deployFaulty(version) {
 }
 
 async function deployWith(version, fault) {
-  const result = await run(process.execPath, [DEPLOY_SCRIPT, '--version', version, '--fault', fault]);
+  const result = await run(process.execPath, [DEPLOY_SCRIPT, '--version', version, '--fault', fault], { timeoutMs: 300_000 });
   if (result.code !== 0) {
     throw new Error(`deploy ${version} (${fault}) exited ${result.code}: ${result.stderr.trim() || result.stdout.trim()}`);
   }
@@ -247,20 +274,35 @@ export function verifyEventIdV5() {
 
 // ---- orders -----------------------------------------------------------------------------------------------
 
+const ORDER_TIMEOUT_MS = 10_000;
+
+// postOrder sends one order with a deadline. A request that gets no response is aborted and reported.
+export async function postOrder(url, order, { timeoutMs = ORDER_TIMEOUT_MS } = {}) {
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(order),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    return { status: response.status, text: await response.text() };
+  } catch (error) {
+    if (error.name === 'TimeoutError' || error.name === 'AbortError') {
+      throw new Error(`order POST timed out after ${timeoutMs}ms`);
+    }
+    throw error;
+  }
+}
+
 // sendOrders posts count fresh orders while Payments is faulted. Each must return HTTP 502 with the body
 // the Orders service actually produces (see the Task 11 decision: order_id, status failed, reason).
 export async function sendOrders(count) {
   const ids = [];
   for (let i = 0; i < count; i += 1) {
     const orderId = randomUUID();
-    const response = await fetch(ORDERS_URL, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ order_id: orderId, item: 'acceptance-widget', amount_cents: 1000 }),
-    });
-    const text = await response.text();
-    if (response.status !== 502) {
-      throw new Error(`order ${orderId}: expected HTTP 502, got ${response.status} ${text}`);
+    const { status, text } = await postOrder(ORDERS_URL, { order_id: orderId, item: 'acceptance-widget', amount_cents: 1000 });
+    if (status !== 502) {
+      throw new Error(`order ${orderId}: expected HTTP 502, got ${status} ${text}`);
     }
     const expected = { order_id: orderId, status: 'failed', reason: FAILURE_REASON };
     if (text !== JSON.stringify(expected) && JSON.stringify(JSON.parse(text)) !== JSON.stringify(expected)) {
@@ -362,10 +404,20 @@ async function waitDeploymentSucceeded(deploymentId) {
 }
 
 // Scenario A: the main path, deduplication, dead letter, and telemetry idempotency.
-async function scenarioA(state) {
-  await setCollectorHooks({ failAttempts: 0, crash: 0 });
+// prepareFirstDeployment restores the hooks, waits for the normalizer group to be Stable with one member, and
+// only then publishes the first deployment. The collaborators are injected so the order can be tested.
+export async function prepareFirstDeployment({ setHooks, waitForGroup, deploy }) {
+  await setHooks({ failAttempts: 0, crash: 0 });
+  await waitForGroup();
+  return deploy();
+}
 
-  state.D1 = await deployFaulty('0.2.0-faulty');
+async function scenarioA(state) {
+  state.D1 = await prepareFirstDeployment({
+    setHooks: setCollectorHooks,
+    waitForGroup: waitForNormalizerGroupStable,
+    deploy: () => deployFaulty('0.2.0-faulty'),
+  });
   await waitDeploymentSucceeded(state.D1);
 
   const incidentHwBeforeTrigger = await highWatermark(INCIDENT_TOPIC);

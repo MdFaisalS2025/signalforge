@@ -81,10 +81,10 @@ func (s *fakeStore) InsertEvents(ctx context.Context, events []canonical.Event) 
 func (s *fakeStore) InsertDeployments(ctx context.Context, d []canonical.Deployment) error {
 	return nil
 }
-func (s *fakeStore) SucceededDeployments(ctx context.Context, since time.Time) ([]canonical.Deployment, error) {
+func (s *fakeStore) SucceededDeployments(ctx context.Context, since, until time.Time) ([]canonical.Deployment, error) {
 	return nil, nil
 }
-func (s *fakeStore) FailureTraces(ctx context.Context, since time.Time) ([]store.FailureRow, error) {
+func (s *fakeStore) FailureTraces(ctx context.Context, since, until time.Time) ([]store.FailureRow, error) {
 	return nil, nil
 }
 

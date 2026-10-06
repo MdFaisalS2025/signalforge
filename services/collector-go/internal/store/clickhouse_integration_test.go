@@ -207,7 +207,7 @@ func TestIntegrationClickHouseCanonicalEventAndSucceededDeployment(t *testing.T)
 	if err := c.InsertDeployments(ctx, []canonical.Deployment{dep}); err != nil {
 		t.Fatal(err)
 	}
-	got, err := c.SucceededDeployments(ctx, ts.Add(-time.Minute))
+	got, err := c.SucceededDeployments(ctx, ts.Add(-time.Minute), ts.Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}

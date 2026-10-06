@@ -115,9 +115,47 @@ func TestDeploymentMappingAndStatus(t *testing.T) {
 	if reason != "" || d.DeploymentID != "d3b07384-d9a0-4a3e-8f4c-1a2b3c4d5e6f" {
 		t.Fatalf("%+v %q", d, reason)
 	}
-	_, reason = MapDeploymentMessage([]byte(`{"schema_version":"1.0","deployment_id":"x","timestamp":"2026-10-03T12:00:00Z","service":"demo-payments","new_version":"v","status":"failed"}`))
+	_, reason = MapDeploymentMessage([]byte(`{"schema_version":"1.0","deployment_id":"d3b07384-d9a0-4a3e-8f4c-1a2b3c4d5e6f","timestamp":"2026-10-03T12:00:00Z","service":"demo-payments","new_version":"v","status":"failed"}`))
 	if reason != "deployment event status must be succeeded" {
 		t.Fatalf("got %q", reason)
+	}
+}
+
+// Deployment payloads are validated against deployment_event.schema.json before they can reach ClickHouse.
+const validDeploymentFields = `"schema_version":"1.0","deployment_id":"d3b07384-d9a0-4a3e-8f4c-1a2b3c4d5e6f","timestamp":"2026-10-03T12:00:00Z","service":"demo-payments","new_version":"0.2.0","status":"succeeded"`
+
+func TestDeploymentRejectsUnsupportedSchemaVersion(t *testing.T) {
+	_, reason := MapDeploymentMessage([]byte(`{"schema_version":"2.0","deployment_id":"d3b07384-d9a0-4a3e-8f4c-1a2b3c4d5e6f","timestamp":"2026-10-03T12:00:00Z","service":"demo-payments","new_version":"0.2.0","status":"succeeded"}`))
+	if reason != "deployment event schema_version must be 1.0" {
+		t.Fatalf("got %q", reason)
+	}
+}
+
+func TestDeploymentRejectsMalformedDeploymentID(t *testing.T) {
+	_, reason := MapDeploymentMessage([]byte(`{"schema_version":"1.0","deployment_id":"not-a-uuid","timestamp":"2026-10-03T12:00:00Z","service":"demo-payments","new_version":"0.2.0","status":"succeeded"}`))
+	if reason != "deployment event deployment_id must be a valid UUID" {
+		t.Fatalf("got %q", reason)
+	}
+}
+
+func TestDeploymentRejectsUnexpectedField(t *testing.T) {
+	_, reason := MapDeploymentMessage([]byte(`{` + validDeploymentFields + `,"color":"red"}`))
+	if reason != "deployment event has unexpected field color" {
+		t.Fatalf("got %q", reason)
+	}
+}
+
+func TestDeploymentRejectsNonStringField(t *testing.T) {
+	_, reason := MapDeploymentMessage([]byte(`{"schema_version":"1.0","deployment_id":"d3b07384-d9a0-4a3e-8f4c-1a2b3c4d5e6f","timestamp":"2026-10-03T12:00:00Z","service":5,"new_version":"0.2.0","status":"succeeded"}`))
+	if reason != "deployment event service must be a string" {
+		t.Fatalf("got %q", reason)
+	}
+}
+
+func TestDeploymentAcceptsValidFields(t *testing.T) {
+	d, reason := MapDeploymentMessage([]byte(`{` + validDeploymentFields + `}`))
+	if reason != "" || d.NewVersion != "0.2.0" {
+		t.Fatalf("%+v %q", d, reason)
 	}
 }
 

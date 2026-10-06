@@ -26,11 +26,11 @@ type Correlator struct {
 // records the cycle. Creation inserts revision 1 in the pending state with no published timestamp.
 func (c *Correlator) RunCycle(ctx context.Context, now time.Time) error {
 	since := now.Add(-lookbackWindow)
-	failures, err := c.Store.FailureTraces(ctx, since)
+	failures, err := c.Store.FailureTraces(ctx, since, now)
 	if err != nil {
 		return fmt.Errorf("read failure traces: %w", err)
 	}
-	deployments, err := c.Store.SucceededDeployments(ctx, since)
+	deployments, err := c.Store.SucceededDeployments(ctx, since, now)
 	if err != nil {
 		return fmt.Errorf("read succeeded deployments: %w", err)
 	}

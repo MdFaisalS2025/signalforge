@@ -59,7 +59,8 @@ process starts after `redpanda-init` completes and after ClickHouse is healthy.
   non-null only in the published revision.
 
 ### Delivery guarantee
-- **Persisted:** exactly one latest incident per dedup key, and exactly four evidence
+- **Persisted:** each incident has one latest revision. The same dedup key can produce separate incidents in
+  later, non-overlapping five-minute windows, and each of those has exactly four evidence
   rows (one deployment row and three trigger-trace rows). Repeated evidence inserts
   replace themselves by ID.
 - **Published:** at-least-once, keyed by `incident_id`. The publisher produces, then

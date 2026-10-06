@@ -87,10 +87,10 @@ func (s *fakeStore) InsertDeployments(ctx context.Context, deployments []canonic
 	return nil
 }
 
-func (s *fakeStore) SucceededDeployments(ctx context.Context, since time.Time) ([]canonical.Deployment, error) {
+func (s *fakeStore) SucceededDeployments(ctx context.Context, since, until time.Time) ([]canonical.Deployment, error) {
 	return nil, nil
 }
-func (s *fakeStore) FailureTraces(ctx context.Context, since time.Time) ([]store.FailureRow, error) {
+func (s *fakeStore) FailureTraces(ctx context.Context, since, until time.Time) ([]store.FailureRow, error) {
 	return nil, nil
 }
 func (s *fakeStore) IncidentsByKey(ctx context.Context, dedupKey string) ([]store.IncidentRow, error) {
@@ -334,6 +334,34 @@ func TestDeploymentRecordIsStored(t *testing.T) {
 	}
 	if f.consumer.Committed()[0] != 13 {
 		t.Fatal("deployment offset not committed")
+	}
+}
+
+// A malformed deployment ID is dead-lettered with its exact reason. The valid deployment after it in the same
+// batch is persisted, and the whole batch is committed.
+func TestMalformedDeploymentIsDeadLetteredAndBatchContinues(t *testing.T) {
+	f := newFakes()
+	n := newNormalizer(f, NewBackoff())
+	bad := `{"schema_version":"1.0","deployment_id":"not-a-uuid","timestamp":"2026-10-03T12:00:00Z","service":"demo-payments","new_version":"0.2.0","status":"succeeded"}`
+	batch := []Record{
+		{Topic: "deployments.v1", Offset: 80, Value: []byte(bad)},
+		deploymentRecord(81),
+	}
+	if err := n.ProcessBatch(ctx, batch); err != nil {
+		t.Fatal(err)
+	}
+	sent := f.producer.Sent()
+	if len(sent) != 1 {
+		t.Fatalf("dead letters %d, want 1", len(sent))
+	}
+	if dl := decodeDeadLetter(t, sent[0].Value); dl.Reason != "deployment event deployment_id must be a valid UUID" || dl.SourceOffset != 80 {
+		t.Fatalf("%+v", dl)
+	}
+	if f.store.DeploymentsWritten() != 1 {
+		t.Fatalf("deployments written %d, want 1", f.store.DeploymentsWritten())
+	}
+	if !reflect.DeepEqual(f.consumer.Committed(), []int64{80, 81}) {
+		t.Fatalf("committed %v", f.consumer.Committed())
 	}
 }
 

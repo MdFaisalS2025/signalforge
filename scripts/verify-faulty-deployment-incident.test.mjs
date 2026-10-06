@@ -1,6 +1,46 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseSinglePartitionHighWatermark, compareExactTraceSets, parseConsumerGroupSummary } from './verify-faulty-deployment-incident.mjs';
+import http from 'node:http';
+import { parseSinglePartitionHighWatermark, compareExactTraceSets, parseConsumerGroupSummary, run, postOrder, pollUntil, prepareFirstDeployment } from './verify-faulty-deployment-incident.mjs';
+
+test('a child process that outlives its timeout is killed and reports the timeout', async () => {
+  const result = await run(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { timeoutMs: 300 });
+  assert.equal(result.code, -1);
+  assert.match(result.stderr, /timed out after 300ms/);
+});
+
+test('an order POST that gets no response is aborted at its deadline', async () => {
+  const server = http.createServer(() => {}); // accepts the request and never answers
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  try {
+    await assert.rejects(
+      postOrder(`http://127.0.0.1:${port}/orders`, { order_id: 'x' }, { timeoutMs: 300 }),
+      /timed out after 300ms/,
+    );
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('the initial scenario waits for a stable normalizer group before the first deployment', async () => {
+  const calls = [];
+  const id = await prepareFirstDeployment({
+    setHooks: async (hooks) => { calls.push(`hooks ${hooks.failAttempts}/${hooks.crash}`); },
+    waitForGroup: async () => { calls.push('group stable'); },
+    deploy: async () => { calls.push('deploy'); return 'D-initial'; },
+  });
+  assert.deepEqual(calls, ['hooks 0/0', 'group stable', 'deploy']);
+  assert.equal(id, 'D-initial');
+});
+
+test('a hung check cannot bypass the overall polling deadline', { timeout: 5000 }, async () => {
+  await assert.rejects(
+    pollUntil(() => new Promise(() => {}), { timeoutMs: 300, what: 'hung check' }),
+    /Timed out after 300ms waiting for: hung check/,
+  );
+});
 
 test('identical trace sets match regardless of order', () => {
   assert.equal(compareExactTraceSets(['b', 'a', 'c'], ['a', 'c', 'b']).equal, true);

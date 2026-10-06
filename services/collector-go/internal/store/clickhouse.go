@@ -120,13 +120,13 @@ const failureTracesSQL = `SELECT trace_id, deployment_id, service, min(timestamp
 FROM telemetry_events FINAL
 WHERE type = 'trace' AND service = 'demo-payments'
   AND JSONExtractString(attributes, 'span.kind') = 'server'
-  AND deployment_id != '' AND timestamp >= ?
+  AND deployment_id != '' AND timestamp >= ? AND timestamp <= ?
   AND JSONExtractInt(attributes, 'http.response.status_code') = 500
 GROUP BY trace_id, deployment_id, service
 ORDER BY ts`
 
-func (c *ClickHouse) FailureTraces(ctx context.Context, since time.Time) ([]FailureRow, error) {
-	rows, err := c.conn.Query(ctx, failureTracesSQL, since.UTC())
+func (c *ClickHouse) FailureTraces(ctx context.Context, since, until time.Time) ([]FailureRow, error) {
+	rows, err := c.conn.Query(ctx, failureTracesSQL, since.UTC(), until.UTC())
 	if err != nil {
 		return nil, err
 	}
@@ -321,12 +321,12 @@ func (c *ClickHouse) InsertDeployments(ctx context.Context, deployments []canoni
 
 const succeededDeploymentsSQL = `SELECT deployment_id, timestamp, service, environment, new_version, previous_version, initiated_by, status
 FROM deployments FINAL
-WHERE service = 'demo-payments' AND status = 'succeeded' AND timestamp >= ?
+WHERE service = 'demo-payments' AND status = 'succeeded' AND timestamp >= ? AND timestamp <= ?
 ORDER BY timestamp`
 
 // SucceededDeployments reads demo-payments deployments with status succeeded, deduplicated with FINAL.
-func (c *ClickHouse) SucceededDeployments(ctx context.Context, since time.Time) ([]canonical.Deployment, error) {
-	rows, err := c.conn.Query(ctx, succeededDeploymentsSQL, since.UTC())
+func (c *ClickHouse) SucceededDeployments(ctx context.Context, since, until time.Time) ([]canonical.Deployment, error) {
+	rows, err := c.conn.Query(ctx, succeededDeploymentsSQL, since.UTC(), until.UTC())
 	if err != nil {
 		return nil, err
 	}

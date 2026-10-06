@@ -12,8 +12,8 @@ type Store interface {
 	MigrateUp(ctx context.Context) error
 	InsertEvents(ctx context.Context, events []canonical.Event) error                  // idempotent by event_id
 	InsertDeployments(ctx context.Context, deployments []canonical.Deployment) error   // idempotent by deployment_id
-	SucceededDeployments(ctx context.Context, since time.Time) ([]canonical.Deployment, error) // status succeeded, demo-payments, FINAL
-	FailureTraces(ctx context.Context, since time.Time) ([]FailureRow, error)
+	SucceededDeployments(ctx context.Context, since, until time.Time) ([]canonical.Deployment, error) // status succeeded, demo-payments, FINAL
+	FailureTraces(ctx context.Context, since, until time.Time) ([]FailureRow, error)
 	IncidentsByKey(ctx context.Context, dedupKey string) ([]IncidentRow, error)           // latest revision per incident_id
 	InsertIncidentWithEvidence(ctx context.Context, inc IncidentRow, ev []EvidenceRow) error // inc.Revision == 1, state pending, PublishedAt nil
 	InsertEvidence(ctx context.Context, ev []EvidenceRow) error                          // idempotent by evidence_id

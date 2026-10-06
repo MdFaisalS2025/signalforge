@@ -77,13 +77,13 @@ func (f *Fake) InsertDeployments(ctx context.Context, deployments []canonical.De
 
 // SucceededDeployments returns demo-payments deployments with status succeeded and Timestamp >= since,
 // ordered by Timestamp.
-func (f *Fake) SucceededDeployments(ctx context.Context, since time.Time) ([]canonical.Deployment, error) {
+func (f *Fake) SucceededDeployments(ctx context.Context, since, until time.Time) ([]canonical.Deployment, error) {
 	if f.failRead {
 		return nil, errInjected
 	}
 	var out []canonical.Deployment
 	for _, d := range f.deployments {
-		if d.Service == "demo-payments" && d.Status == "succeeded" && !d.Timestamp.Before(since) {
+		if d.Service == "demo-payments" && d.Status == "succeeded" && !d.Timestamp.Before(since) && !d.Timestamp.After(until) {
 			out = append(out, d)
 		}
 	}
@@ -113,13 +113,13 @@ func (f *Fake) MigrateUp(ctx context.Context) error {
 	return nil
 }
 
-func (f *Fake) FailureTraces(ctx context.Context, since time.Time) ([]FailureRow, error) {
+func (f *Fake) FailureTraces(ctx context.Context, since, until time.Time) ([]FailureRow, error) {
 	if f.failRead {
 		return nil, errInjected
 	}
 	var out []FailureRow
 	for _, r := range f.failures {
-		if !r.Timestamp.Before(since) {
+		if !r.Timestamp.Before(since) && !r.Timestamp.After(until) {
 			out = append(out, r)
 		}
 	}
@@ -246,7 +246,7 @@ func TestSucceededDeploymentsFilter(t *testing.T) {
 		{DeploymentID: "failed", Timestamp: since.Add(2 * time.Second), Service: "demo-payments", Status: "failed"},
 		{DeploymentID: "other", Timestamp: since.Add(3 * time.Second), Service: "demo-orders", Status: "succeeded"},
 	})
-	got, err := f.SucceededDeployments(ctx, since)
+	got, err := f.SucceededDeployments(ctx, since, since.Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
