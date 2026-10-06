@@ -4,7 +4,7 @@ import http from 'node:http';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseSinglePartitionHighWatermark, compareExactTraceSets, parseConsumerGroupSummary, run, postOrder, pollUntil, prepareFirstDeployment, POLL_CLEANUP_ALLOWANCE_MS } from './verify-faulty-deployment-incident.mjs';
+import { parseSinglePartitionHighWatermark, compareExactTraceSets, parseConsumerGroupSummary, run, postOrder, pollUntil, prepareFirstDeployment, POLL_CLEANUP_ALLOWANCE_MS, ProcessCleanupError } from './verify-faulty-deployment-incident.mjs';
 
 // The process is gone when signal 0 fails with ESRCH. A process that is still running (or is a zombie we cannot
 // signal) fails the assertion.
@@ -43,6 +43,63 @@ test('a timed-out parent and its descendant are both gone before the poll reject
     const { parent, child } = JSON.parse(readFileSync(pidFile, 'utf8'));
     assertGone(parent, 'parent');
     assertGone(child, 'descendant');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// A stand-in for taskkill that prints a failure and exits nonzero, or that never finishes.
+const FAILING_TASKKILL = "process.stderr.write('ERROR: ACCESS IS DENIED'); process.exitCode = 1;";
+const HANGING_TASKKILL = 'setTimeout(() => {}, 60000);';
+const LONG_LIVED = "require('fs').writeFileSync(process.argv[1], String(process.pid)); setTimeout(() => {}, 60000);";
+
+// Kills the child left running by a test, so a failed assertion does not leak a process.
+function killIfRunning(pid) {
+  try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+}
+
+test('a failing taskkill is a cleanup failure, not an ordinary cancellation', { skip: process.platform !== 'win32', timeout: 20000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'taskkill-fail-'));
+  const pidFile = join(dir, 'pid');
+  const cleanup = { taskkill: { command: process.execPath, args: ['-e', FAILING_TASKKILL] } };
+  try {
+    await assert.rejects(
+      run(process.execPath, ['-e', LONG_LIVED, pidFile], { timeoutMs: 300, cleanup }),
+      (error) => error instanceof ProcessCleanupError && /ACCESS IS DENIED/.test(error.message),
+    );
+    killIfRunning(Number(readFileSync(pidFile, 'utf8')));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a hung taskkill is bounded by the cleanup deadline and reported as a cleanup failure', { skip: process.platform !== 'win32', timeout: 20000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'taskkill-hang-'));
+  const pidFile = join(dir, 'pid');
+  const started = Date.now();
+  const cleanup = { taskkill: { command: process.execPath, args: ['-e', HANGING_TASKKILL] } };
+  try {
+    await assert.rejects(
+      run(process.execPath, ['-e', LONG_LIVED, pidFile], { timeoutMs: 300, cleanup }),
+      (error) => error instanceof ProcessCleanupError,
+    );
+    // The helper's own time counts toward the cleanup deadline: timeout plus cleanup budget, with slack.
+    assert.ok(Date.now() - started < 300 + 1500 + 1000, `cleanup took ${Date.now() - started}ms`);
+    killIfRunning(Number(readFileSync(pidFile, 'utf8')));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a POSIX process-table read that fails is a cleanup failure, not a silent cleanup', { skip: process.platform === 'win32', timeout: 20000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ps-fail-'));
+  const pidFile = join(dir, 'pid');
+  try {
+    await assert.rejects(
+      run(process.execPath, ['-e', LONG_LIVED, pidFile], { timeoutMs: 300, cleanup: { ps: 'no-such-process-table-command' } }),
+      (error) => error instanceof ProcessCleanupError,
+    );
+    killIfRunning(Number(readFileSync(pidFile, 'utf8')));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

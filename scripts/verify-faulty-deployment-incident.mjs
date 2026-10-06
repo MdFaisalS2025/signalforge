@@ -51,32 +51,120 @@ export class ProcessCleanupError extends Error {
   }
 }
 
-// terminateTree kills a child and every descendant. Windows: taskkill /T walks the parent-child tree, so it reaches
-// descendants even when they are detached. POSIX: the child was started as a process-group leader, so its group is
-// signalled. The taskkill process runs with an argument array and no shell.
-function terminateTree(child) {
-  return new Promise((resolve) => {
-    if (child.exitCode !== null || child.signalCode !== null) return resolve();
-    if (process.platform === 'win32') {
-      const killer = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
-      killer.on('error', () => { child.kill(); resolve(); });
-      killer.on('close', () => { child.kill(); resolve(); });
-      return undefined;
-    }
-    try {
-      process.kill(-child.pid, 'SIGKILL');
-    } catch {
-      child.kill('SIGKILL');
-    }
-    return resolve();
+// Runs one helper command (taskkill or ps) with an argument array and no shell. It is killed when deadline passes,
+// so the helper's own time counts toward the cleanup budget. Resolves with code null when it was killed.
+function captureWithin(command, args, deadline) {
+  return new Promise((resolve, reject) => {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) return reject(new Error(`no cleanup time left to run ${command}`));
+    const helper = spawn(command, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    const timer = setTimeout(() => helper.kill('SIGKILL'), remainingMs);
+    helper.stdout.on('data', (chunk) => { stdout += chunk; });
+    helper.stderr.on('data', (chunk) => { stderr += chunk; });
+    helper.on('error', (err) => { clearTimeout(timer); reject(err); });
+    helper.on('close', (code) => { clearTimeout(timer); resolve({ code, stdout, stderr }); });
   });
+}
+
+// Parses `ps -eo pid,ppid,stat` output. Every row must carry numeric pid and ppid, or the whole read fails.
+export function parseProcessTable(text) {
+  const rows = [];
+  for (const line of text.split('\n').slice(1)) {
+    if (line.trim() === '') continue;
+    const [pid, ppid, stat = ''] = line.trim().split(/\s+/);
+    if (!/^\d+$/.test(pid ?? '') || !/^\d+$/.test(ppid ?? '')) throw new Error(`unparseable process table row: ${line.trim()}`);
+    rows.push({ pid: Number(pid), ppid: Number(ppid), zombie: stat.startsWith('Z') });
+  }
+  return rows;
+}
+
+// Every process whose parent chain reaches root. This finds descendants that started their own process group or
+// session, which a group signal misses.
+export function descendantsOf(rows, root) {
+  const children = new Map();
+  for (const { pid, ppid } of rows) {
+    if (!children.has(ppid)) children.set(ppid, []);
+    children.get(ppid).push(pid);
+  }
+  const found = [];
+  const queue = [root];
+  for (let next = queue.shift(); next !== undefined; next = queue.shift()) {
+    for (const pid of children.get(next) ?? []) {
+      found.push(pid);
+      queue.push(pid);
+    }
+  }
+  return found;
+}
+
+async function readProcessTable(psCommand, deadline) {
+  const { code, stdout, stderr } = await captureWithin(psCommand, ['-eo', 'pid,ppid,stat'], deadline);
+  if (code !== 0) throw new Error(`${psCommand} exited ${code}: ${stderr.trim()}`);
+  return parseProcessTable(stdout);
+}
+
+// Polls the process table until none of pids is alive (a zombie counts as gone), within deadline.
+async function waitForGone(pids, psCommand, deadline) {
+  for (;;) {
+    const live = new Set((await readProcessTable(psCommand, deadline)).filter((row) => !row.zombie).map((row) => row.pid));
+    const stillRunning = pids.find((pid) => live.has(pid));
+    if (stillRunning === undefined) return;
+    if (Date.now() >= deadline) throw new Error(`pid ${stillRunning} still running after kill`);
+    await delay(Math.min(50, deadline - Date.now()));
+  }
+}
+
+// Windows: taskkill /T ends the root and its whole parent-child tree. It must exit 0, or the root must already be
+// gone. A failure, or a helper that does not finish by deadline, is an error.
+async function terminateWindowsTree(child, deadline, killer) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const { code, stderr } = await captureWithin(killer.command, [...killer.args, '/PID', String(child.pid), '/T', '/F'], deadline);
+  if (code !== 0) throw new Error(`taskkill exited ${code ?? 'after its deadline'}: ${stderr.trim()}`);
+}
+
+// POSIX: the tree is discovered before anything is killed, because killing a parent reparents its children and
+// hides them from a parent-link walk. The root's process group is signalled as a fast path, and every discovered
+// process is signalled too, so a descendant that left the group is still terminated. Closure is then confirmed.
+async function terminatePosixTree(child, deadline, psCommand) {
+  const table = await readProcessTable(psCommand, deadline);
+  const targets = [child.pid, ...descendantsOf(table, child.pid)];
+  try {
+    process.kill(-child.pid, 'SIGKILL');
+  } catch (err) {
+    if (err.code !== 'ESRCH') throw err;
+  }
+  for (const pid of targets) {
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch (err) {
+      if (err.code !== 'ESRCH') throw err;
+    }
+  }
+  await waitForGone(targets, psCommand, deadline);
+}
+
+// terminateTree ends a cancelled child and every descendant before deadline. The cleanup options name the helper
+// commands; the defaults are the platform's own (taskkill, ps).
+function terminateTree(child, deadline, cleanup) {
+  if (process.platform === 'win32') {
+    const { taskkill = { command: 'taskkill', args: [] } } = cleanup;
+    return terminateWindowsTree(child, deadline, { args: [], ...taskkill });
+  }
+  return terminatePosixTree(child, deadline, cleanup.ps ?? 'ps');
+}
+
+// Resolves true if exited is settled before deadline, false otherwise.
+function exitedWithin(exited, deadline) {
+  return Promise.race([exited.then(() => true), delay(Math.max(0, deadline - Date.now())).then(() => false)]);
 }
 
 // Runs a command with an argument array, no shell, and a hidden window. A child that outlives timeoutMs, or whose
 // signal (or the enclosing poll's signal) aborts, has its whole process tree terminated. The call resolves only
 // after the direct child has exited. If it cannot be confirmed within CLEANUP_DEADLINE_MS, the call rejects with a
 // ProcessCleanupError.
-export function run(command, args, { env = process.env, input, timeoutMs = DEFAULT_CHILD_TIMEOUT_MS, signal } = {}) {
+export function run(command, args, { env = process.env, input, timeoutMs = DEFAULT_CHILD_TIMEOUT_MS, signal, cleanup = {} } = {}) {
   const abortSignal = signal ?? pollContext.getStore();
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
@@ -101,10 +189,16 @@ export function run(command, args, { env = process.env, input, timeoutMs = DEFAU
     const stop = async (reason) => {
       if (stopping) return;
       stopping = true;
-      await terminateTree(child);
-      const exitedInTime = await Promise.race([exited.then(() => true), delay(CLEANUP_DEADLINE_MS).then(() => false)]);
-      if (!exitedInTime) {
-        finish(reject, new ProcessCleanupError(command, child.pid, `not exited within ${CLEANUP_DEADLINE_MS}ms after ${reason}`));
+      // One deadline covers discovery, kill, the helper commands, and the wait for exit.
+      const deadline = Date.now() + CLEANUP_DEADLINE_MS;
+      try {
+        await terminateTree(child, deadline, cleanup);
+        if (!(await exitedWithin(exited, deadline))) {
+          throw new Error(`not exited within ${CLEANUP_DEADLINE_MS}ms`);
+        }
+      } catch (err) {
+        const detail = `${reason}: ${err.message}`;
+        finish(reject, err instanceof ProcessCleanupError ? err : new ProcessCleanupError(command, child.pid, detail));
         return;
       }
       finish(resolve, { code: -1, stdout, stderr: `${stderr}${reason}: ${command} ${args.join(' ')}` });
