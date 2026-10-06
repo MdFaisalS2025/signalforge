@@ -4,6 +4,7 @@
 // Cleanup never removes volumes.
 
 import { spawn } from 'node:child_process';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -34,29 +35,49 @@ const CONTAINER_WAIT = { intervalMs: 1000, timeoutMs: 60_000 };
 
 const DEFAULT_CHILD_TIMEOUT_MS = 120_000;
 
-// Runs a command with an argument array, no shell, and a hidden window. A child that outlives timeoutMs is
-// killed, and the result has code -1 and a timeout diagnostic in stderr.
-export function run(command, args, { env = process.env, input, timeoutMs = DEFAULT_CHILD_TIMEOUT_MS } = {}) {
+// pollContext carries the signal of the poll that is running a check. Any child process or HTTP request the
+// check starts inherits that signal, so the deadline cancels it without threading a parameter through every call.
+const pollContext = new AsyncLocalStorage();
+
+// Runs a command with an argument array, no shell, and a hidden window. A child that outlives timeoutMs, or whose
+// signal (or the enclosing poll's signal) aborts, is killed. The call resolves only after the child has closed.
+export function run(command, args, { env = process.env, input, timeoutMs = DEFAULT_CHILD_TIMEOUT_MS, signal } = {}) {
+  const abortSignal = signal ?? pollContext.getStore();
   return new Promise((resolve) => {
     const child = spawn(command, args, { env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     let settled = false;
+    let stopping = false;
     let timer;
     const finish = (result) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      abortSignal?.removeEventListener('abort', onAbort);
       resolve(result);
     };
-    timer = setTimeout(() => {
+    // Kill the child, then resolve once it has exited, so no process outlives this call. A child that will not exit
+    // is abandoned after a short grace period.
+    const stop = (reason) => {
+      if (stopping) return;
+      stopping = true;
+      const exited = new Promise((done) => child.once('close', done));
       child.kill();
-      finish({ code: -1, stdout, stderr: `${stderr}timed out after ${timeoutMs}ms: ${command} ${args.join(' ')}` });
-    }, timeoutMs);
+      Promise.race([exited, delay(3000)]).then(() => {
+        finish({ code: -1, stdout, stderr: `${stderr}${reason}: ${command} ${args.join(' ')}` });
+      });
+    };
+    const onAbort = () => stop('aborted by poll deadline');
+    timer = setTimeout(() => stop(`timed out after ${timeoutMs}ms`), timeoutMs);
+    if (abortSignal) {
+      if (abortSignal.aborted) onAbort();
+      else abortSignal.addEventListener('abort', onAbort, { once: true });
+    }
     child.stdout.on('data', (chunk) => { stdout += chunk; });
     child.stderr.on('data', (chunk) => { stderr += chunk; });
     child.on('error', (err) => finish({ code: -1, stdout, stderr: stderr + err.message }));
-    child.on('close', (code) => finish({ code, stdout, stderr }));
+    child.on('close', (code) => { if (!stopping) finish({ code, stdout, stderr }); });
     child.stdin.on('error', () => {});
     child.stdin.end(input ?? '');
   });
@@ -72,6 +93,7 @@ function delay(ms) {
 }
 
 const TIMED_OUT = Symbol('timed out');
+const CANCEL_GRACE_MS = 1000;
 
 // pollUntil repeatedly calls check(remainingMs) until it returns a truthy value, and throws after timeoutMs.
 // Each check races the time that remains, so a check that never settles cannot extend the overall deadline.
@@ -79,18 +101,24 @@ export async function pollUntil(check, { intervalMs = 500, timeoutMs, what = 'co
   const deadline = Date.now() + timeoutMs;
   const timeoutError = () => new Error(`Timed out after ${timeoutMs}ms waiting for: ${what}`);
   for (;;) {
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) throw timeoutError();
-    let timer;
-    const expired = new Promise((resolve) => { timer = setTimeout(() => resolve(TIMED_OUT), remaining); });
-    let value;
-    try {
-      value = await Promise.race([check(remaining), expired]);
-    } finally {
-      clearTimeout(timer);
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) throw timeoutError();
+    const controller = new AbortController();
+    const attempt = Promise.resolve()
+      .then(() => pollContext.run(controller.signal, () => check({ remainingMs, signal: controller.signal })))
+      .then((value) => ({ value }), (error) => ({ error }));
+    let deadlineTimer;
+    const expired = new Promise((resolve) => { deadlineTimer = setTimeout(() => resolve(TIMED_OUT), remainingMs); });
+    const outcome = await Promise.race([attempt, expired]);
+    clearTimeout(deadlineTimer);
+    if (outcome === TIMED_OUT) {
+      // The deadline has passed. Cancel the check and give it a short grace period to exit, so its children are gone.
+      controller.abort();
+      await Promise.race([attempt, delay(CANCEL_GRACE_MS)]);
+      throw timeoutError();
     }
-    if (value === TIMED_OUT) throw timeoutError();
-    if (value) return value;
+    if (outcome.error) throw outcome.error;
+    if (outcome.value) return outcome.value;
     if (Date.now() >= deadline) throw timeoutError();
     await delay(Math.min(intervalMs, deadline - Date.now()));
   }
@@ -277,16 +305,19 @@ export function verifyEventIdV5() {
 const ORDER_TIMEOUT_MS = 10_000;
 
 // postOrder sends one order with a deadline. A request that gets no response is aborted and reported.
-export async function postOrder(url, order, { timeoutMs = ORDER_TIMEOUT_MS } = {}) {
+export async function postOrder(url, order, { timeoutMs = ORDER_TIMEOUT_MS, signal } = {}) {
+  const pollSignal = signal ?? pollContext.getStore();
+  const deadline = AbortSignal.timeout(timeoutMs);
   try {
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(order),
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: pollSignal ? AbortSignal.any([deadline, pollSignal]) : deadline,
     });
     return { status: response.status, text: await response.text() };
   } catch (error) {
+    if (pollSignal?.aborted) throw new Error('order POST aborted by poll deadline');
     if (error.name === 'TimeoutError' || error.name === 'AbortError') {
       throw new Error(`order POST timed out after ${timeoutMs}ms`);
     }

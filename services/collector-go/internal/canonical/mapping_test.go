@@ -152,6 +152,30 @@ func TestDeploymentRejectsNonStringField(t *testing.T) {
 	}
 }
 
+// A literal JSON null is a wrong-typed value, not an absent field. It must be reported as a type problem for
+// every string field, required or optional, and must never be stored as an empty string.
+func TestDeploymentRejectsNullStringFields(t *testing.T) {
+	cases := []struct {
+		name, field, want string
+	}{
+		{"required service", "service", "deployment event service must be a string"},
+		{"required new_version", "new_version", "deployment event new_version must be a string"},
+		{"required status", "status", "deployment event status must be a string"},
+		{"optional environment", "environment", "deployment event environment must be a string"},
+		{"optional previous_version", "previous_version", "deployment event previous_version must be a string"},
+		{"optional initiated_by", "initiated_by", "deployment event initiated_by must be a string"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := `{` + validDeploymentFields + `,"` + tc.field + `":null}`
+			_, reason := MapDeploymentMessage([]byte(payload))
+			if reason != tc.want {
+				t.Fatalf("got %q, want %q", reason, tc.want)
+			}
+		})
+	}
+}
+
 func TestDeploymentAcceptsValidFields(t *testing.T) {
 	d, reason := MapDeploymentMessage([]byte(`{` + validDeploymentFields + `}`))
 	if reason != "" || d.NewVersion != "0.2.0" {

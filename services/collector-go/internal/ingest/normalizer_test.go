@@ -48,7 +48,7 @@ type fakeStore struct {
 	log         *[]string
 }
 
-func (s *fakeStore) FailWrite(on bool)    { s.failWrite = on }
+func (s *fakeStore) FailWrite(on bool)     { s.failWrite = on }
 func (s *fakeStore) FailFirstWrites(n int) { s.failFirst = n }
 func (s *fakeStore) EventsWritten() int    { return len(s.events) }
 func (s *fakeStore) DeploymentsWritten() int {
@@ -361,6 +361,34 @@ func TestMalformedDeploymentIsDeadLetteredAndBatchContinues(t *testing.T) {
 		t.Fatalf("deployments written %d, want 1", f.store.DeploymentsWritten())
 	}
 	if !reflect.DeepEqual(f.consumer.Committed(), []int64{80, 81}) {
+		t.Fatalf("committed %v", f.consumer.Committed())
+	}
+}
+
+// A deployment with a null optional field is dead-lettered. The valid deployment after it in the same batch is
+// persisted, and both offsets are committed.
+func TestNullDeploymentFieldIsDeadLetteredAndBatchContinues(t *testing.T) {
+	f := newFakes()
+	n := newNormalizer(f, NewBackoff())
+	nullEnvironment := `{"schema_version":"1.0","deployment_id":"d3b07384-d9a0-4a3e-8f4c-1a2b3c4d5e6f","timestamp":"2026-10-03T12:00:00Z","service":"demo-payments","environment":null,"new_version":"0.2.0","status":"succeeded"}`
+	batch := []Record{
+		{Topic: "deployments.v1", Offset: 90, Value: []byte(nullEnvironment)},
+		deploymentRecord(91),
+	}
+	if err := n.ProcessBatch(ctx, batch); err != nil {
+		t.Fatal(err)
+	}
+	sent := f.producer.Sent()
+	if len(sent) != 1 {
+		t.Fatalf("dead letters %d, want 1", len(sent))
+	}
+	if dl := decodeDeadLetter(t, sent[0].Value); dl.Reason != "deployment event environment must be a string" || dl.SourceOffset != 90 {
+		t.Fatalf("%+v", dl)
+	}
+	if f.store.DeploymentsWritten() != 1 {
+		t.Fatalf("deployments written %d, want 1", f.store.DeploymentsWritten())
+	}
+	if !reflect.DeepEqual(f.consumer.Committed(), []int64{90, 91}) {
 		t.Fatalf("committed %v", f.consumer.Committed())
 	}
 }

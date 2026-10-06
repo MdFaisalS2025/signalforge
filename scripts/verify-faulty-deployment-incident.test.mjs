@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { parseSinglePartitionHighWatermark, compareExactTraceSets, parseConsumerGroupSummary, run, postOrder, pollUntil, prepareFirstDeployment } from './verify-faulty-deployment-incident.mjs';
 
 test('a child process that outlives its timeout is killed and reports the timeout', async () => {
@@ -33,6 +36,44 @@ test('the initial scenario waits for a stable normalizer group before the first 
   });
   assert.deepEqual(calls, ['hooks 0/0', 'group stable', 'deploy']);
   assert.equal(id, 'D-initial');
+});
+
+// A check that launches a long-lived child must have that child terminated when the poll deadline expires.
+test('a long-lived child under a polling deadline is terminated before pollUntil rejects', { timeout: 15000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'poll-child-'));
+  const pidFile = join(dir, 'pid');
+  const started = Date.now();
+  try {
+    await assert.rejects(
+      pollUntil(({ signal }) => run(process.execPath,
+        ['-e', "require('fs').writeFileSync(process.argv[1], String(process.pid)); setTimeout(() => {}, 60000)", pidFile],
+        { signal, timeoutMs: 60000 }),
+      { timeoutMs: 1000, what: 'long child' }),
+      /Timed out after 1000ms waiting for: long child/,
+    );
+    assert.ok(Date.now() - started < 5000, 'the poll must fail by its own bound');
+    const pid = Number(readFileSync(pidFile, 'utf8'));
+    assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an order POST stops when its poll signal aborts', { timeout: 5000 }, async () => {
+  const server = http.createServer(() => {}); // never answers
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 200);
+  try {
+    await assert.rejects(
+      postOrder(`http://127.0.0.1:${port}/orders`, { order_id: 'x' }, { timeoutMs: 10000, signal: controller.signal }),
+      /aborted/,
+    );
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
 });
 
 test('a hung check cannot bypass the overall polling deadline', { timeout: 5000 }, async () => {

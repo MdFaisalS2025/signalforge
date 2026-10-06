@@ -1,6 +1,7 @@
 package canonical
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -343,7 +344,8 @@ func MapDeploymentMessage(payload []byte) (Deployment, string) {
 			continue
 		}
 		var s string
-		if err := json.Unmarshal(v, &s); err != nil {
+		// A literal null is a wrong-typed value, not an empty string or an absent field.
+		if string(bytes.TrimSpace(v)) == "null" || json.Unmarshal(v, &s) != nil {
 			return Deployment{}, reasonDeploymentStringPrefix + field + " must be a string"
 		}
 		values[field] = s
