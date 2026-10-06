@@ -39,45 +39,86 @@ const DEFAULT_CHILD_TIMEOUT_MS = 120_000;
 // check starts inherits that signal, so the deadline cancels it without threading a parameter through every call.
 const pollContext = new AsyncLocalStorage();
 
+// The time a cancelled child is given to exit after its whole process tree has been terminated.
+const CLEANUP_DEADLINE_MS = 1500;
+
+// A child that could not be confirmed as exited. It is reported, never silently abandoned.
+export class ProcessCleanupError extends Error {
+  constructor(command, pid, detail) {
+    super(`process cleanup failed for ${command} (pid ${pid}): ${detail}`);
+    this.name = 'ProcessCleanupError';
+    this.pid = pid;
+  }
+}
+
+// terminateTree kills a child and every descendant. Windows: taskkill /T walks the parent-child tree, so it reaches
+// descendants even when they are detached. POSIX: the child was started as a process-group leader, so its group is
+// signalled. The taskkill process runs with an argument array and no shell.
+function terminateTree(child) {
+  return new Promise((resolve) => {
+    if (child.exitCode !== null || child.signalCode !== null) return resolve();
+    if (process.platform === 'win32') {
+      const killer = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+      killer.on('error', () => { child.kill(); resolve(); });
+      killer.on('close', () => { child.kill(); resolve(); });
+      return undefined;
+    }
+    try {
+      process.kill(-child.pid, 'SIGKILL');
+    } catch {
+      child.kill('SIGKILL');
+    }
+    return resolve();
+  });
+}
+
 // Runs a command with an argument array, no shell, and a hidden window. A child that outlives timeoutMs, or whose
-// signal (or the enclosing poll's signal) aborts, is killed. The call resolves only after the child has closed.
+// signal (or the enclosing poll's signal) aborts, has its whole process tree terminated. The call resolves only
+// after the direct child has exited. If it cannot be confirmed within CLEANUP_DEADLINE_MS, the call rejects with a
+// ProcessCleanupError.
 export function run(command, args, { env = process.env, input, timeoutMs = DEFAULT_CHILD_TIMEOUT_MS, signal } = {}) {
   const abortSignal = signal ?? pollContext.getStore();
-  return new Promise((resolve) => {
-    const child = spawn(command, args, { env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      env,
+      windowsHide: true,
+      detached: process.platform !== 'win32',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
     let stdout = '';
     let stderr = '';
     let settled = false;
     let stopping = false;
     let timer;
-    const finish = (result) => {
+    const exited = new Promise((done) => child.once('exit', done));
+    const finish = (settle, value) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       abortSignal?.removeEventListener('abort', onAbort);
-      resolve(result);
+      settle(value);
     };
-    // Kill the child, then resolve once it has exited, so no process outlives this call. A child that will not exit
-    // is abandoned after a short grace period.
-    const stop = (reason) => {
+    const stop = async (reason) => {
       if (stopping) return;
       stopping = true;
-      const exited = new Promise((done) => child.once('close', done));
-      child.kill();
-      Promise.race([exited, delay(3000)]).then(() => {
-        finish({ code: -1, stdout, stderr: `${stderr}${reason}: ${command} ${args.join(' ')}` });
-      });
+      await terminateTree(child);
+      const exitedInTime = await Promise.race([exited.then(() => true), delay(CLEANUP_DEADLINE_MS).then(() => false)]);
+      if (!exitedInTime) {
+        finish(reject, new ProcessCleanupError(command, child.pid, `not exited within ${CLEANUP_DEADLINE_MS}ms after ${reason}`));
+        return;
+      }
+      finish(resolve, { code: -1, stdout, stderr: `${stderr}${reason}: ${command} ${args.join(' ')}` });
     };
-    const onAbort = () => stop('aborted by poll deadline');
-    timer = setTimeout(() => stop(`timed out after ${timeoutMs}ms`), timeoutMs);
+    const onAbort = () => { stop('aborted by poll deadline'); };
+    timer = setTimeout(() => { stop(`timed out after ${timeoutMs}ms`); }, timeoutMs);
     if (abortSignal) {
       if (abortSignal.aborted) onAbort();
       else abortSignal.addEventListener('abort', onAbort, { once: true });
     }
     child.stdout.on('data', (chunk) => { stdout += chunk; });
     child.stderr.on('data', (chunk) => { stderr += chunk; });
-    child.on('error', (err) => finish({ code: -1, stdout, stderr: stderr + err.message }));
-    child.on('close', (code) => { if (!stopping) finish({ code, stdout, stderr }); });
+    child.on('error', (err) => { if (!stopping) finish(resolve, { code: -1, stdout, stderr: stderr + err.message }); });
+    child.on('close', (code) => { if (!stopping) finish(resolve, { code, stdout, stderr }); });
     child.stdin.on('error', () => {});
     child.stdin.end(input ?? '');
   });
@@ -93,34 +134,49 @@ function delay(ms) {
 }
 
 const TIMED_OUT = Symbol('timed out');
-const CANCEL_GRACE_MS = 1000;
+// The most time a poll adds beyond its requested timeout, to cancel and clean up its check. A rejection at the
+// deadline therefore arrives within timeoutMs + POLL_CLEANUP_ALLOWANCE_MS.
+export const POLL_CLEANUP_ALLOWANCE_MS = 2000;
 
-// pollUntil repeatedly calls check(remainingMs) until it returns a truthy value, and throws after timeoutMs.
-// Each check races the time that remains, so a check that never settles cannot extend the overall deadline.
+// pollUntil repeatedly calls check({ remainingMs, signal }) until it returns a truthy value, and rejects at timeoutMs.
+// The signal aborts at the deadline and when an enclosing poll aborts. Work started inside the check inherits it.
+// A cleanup failure from a cancelled check is rethrown as a ProcessCleanupError instead of a timeout.
 export async function pollUntil(check, { intervalMs = 500, timeoutMs, what = 'condition' } = {}) {
   const deadline = Date.now() + timeoutMs;
   const timeoutError = () => new Error(`Timed out after ${timeoutMs}ms waiting for: ${what}`);
+  const outer = pollContext.getStore();
   for (;;) {
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) throw timeoutError();
     const controller = new AbortController();
-    const attempt = Promise.resolve()
-      .then(() => pollContext.run(controller.signal, () => check({ remainingMs, signal: controller.signal })))
-      .then((value) => ({ value }), (error) => ({ error }));
-    let deadlineTimer;
-    const expired = new Promise((resolve) => { deadlineTimer = setTimeout(() => resolve(TIMED_OUT), remainingMs); });
-    const outcome = await Promise.race([attempt, expired]);
-    clearTimeout(deadlineTimer);
-    if (outcome === TIMED_OUT) {
-      // The deadline has passed. Cancel the check and give it a short grace period to exit, so its children are gone.
-      controller.abort();
-      await Promise.race([attempt, delay(CANCEL_GRACE_MS)]);
-      throw timeoutError();
+    const cancelFromOuter = () => controller.abort();
+    if (outer) {
+      if (outer.aborted) controller.abort();
+      else outer.addEventListener('abort', cancelFromOuter, { once: true });
     }
-    if (outcome.error) throw outcome.error;
-    if (outcome.value) return outcome.value;
-    if (Date.now() >= deadline) throw timeoutError();
-    await delay(Math.min(intervalMs, deadline - Date.now()));
+    try {
+      const attempt = Promise.resolve()
+        .then(() => pollContext.run(controller.signal, () => check({ remainingMs, signal: controller.signal })))
+        .then((value) => ({ value }), (error) => ({ error }));
+      let deadlineTimer;
+      const expired = new Promise((resolve) => { deadlineTimer = setTimeout(() => resolve(TIMED_OUT), remainingMs); });
+      const outcome = await Promise.race([attempt, expired]);
+      clearTimeout(deadlineTimer);
+      if (outcome === TIMED_OUT) {
+        // Cancel the check and wait, within the allowance, for it to finish cleaning up its processes.
+        controller.abort();
+        const settled = await Promise.race([attempt, delay(POLL_CLEANUP_ALLOWANCE_MS).then(() => null)]);
+        if (settled?.error instanceof ProcessCleanupError) throw settled.error;
+        throw timeoutError();
+      }
+      if (outcome.error) throw outcome.error;
+      if (outcome.value) return outcome.value;
+      if (controller.signal.aborted) throw new Error(`poll cancelled by its outer deadline waiting for: ${what}`);
+      if (Date.now() >= deadline) throw timeoutError();
+      await delay(Math.min(intervalMs, deadline - Date.now()));
+    } finally {
+      outer?.removeEventListener('abort', cancelFromOuter);
+    }
   }
 }
 

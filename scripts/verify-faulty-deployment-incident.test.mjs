@@ -4,7 +4,70 @@ import http from 'node:http';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseSinglePartitionHighWatermark, compareExactTraceSets, parseConsumerGroupSummary, run, postOrder, pollUntil, prepareFirstDeployment } from './verify-faulty-deployment-incident.mjs';
+import { parseSinglePartitionHighWatermark, compareExactTraceSets, parseConsumerGroupSummary, run, postOrder, pollUntil, prepareFirstDeployment, POLL_CLEANUP_ALLOWANCE_MS } from './verify-faulty-deployment-incident.mjs';
+
+// The process is gone when signal 0 fails with ESRCH. A process that is still running (or is a zombie we cannot
+// signal) fails the assertion.
+function assertGone(pid, label) {
+  assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, `${label} (pid ${pid}) is still running`);
+}
+
+// The poll deadline is the requested timeout plus only the documented cleanup allowance.
+function assertWithinDeadline(elapsedMs, timeoutMs) {
+  assert.ok(elapsedMs < timeoutMs + POLL_CLEANUP_ALLOWANCE_MS,
+    `rejected after ${elapsedMs}ms, allowed < ${timeoutMs + POLL_CLEANUP_ALLOWANCE_MS}ms`);
+}
+
+// A parent process that launches a detached long-lived child and records both PIDs, then waits. A detached
+// descendant survives when only its parent is killed, which is the case tree termination must cover.
+const PARENT_WITH_CHILD = [
+  "const { spawn } = require('child_process');",
+  "const fs = require('fs');",
+  "const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore', detached: true });",
+  'child.unref();',
+  "fs.writeFileSync(process.argv[1], JSON.stringify({ parent: process.pid, child: child.pid }));",
+  'setTimeout(() => {}, 60000);',
+].join('\n');
+
+test('a timed-out parent and its descendant are both gone before the poll rejects', { timeout: 20000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'poll-tree-'));
+  const pidFile = join(dir, 'pids.json');
+  const started = Date.now();
+  try {
+    await assert.rejects(
+      pollUntil(({ signal }) => run(process.execPath, ['-e', PARENT_WITH_CHILD, pidFile], { signal, timeoutMs: 60000 }),
+        { timeoutMs: 1000, what: 'process tree' }),
+      /Timed out after 1000ms waiting for: process tree/,
+    );
+    assertWithinDeadline(Date.now() - started, 1000);
+    const { parent, child } = JSON.parse(readFileSync(pidFile, 'utf8'));
+    assertGone(parent, 'parent');
+    assertGone(child, 'descendant');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// An outer deadline must cancel work started inside a nested poll, even though the inner poll's own deadline is later.
+test('an outer poll deadline cancels a nested poll and its child', { timeout: 20000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'poll-nested-'));
+  const pidFile = join(dir, 'pid');
+  const started = Date.now();
+  try {
+    await assert.rejects(
+      pollUntil(() => pollUntil(({ signal }) => run(process.execPath,
+        ['-e', "require('fs').writeFileSync(process.argv[1], String(process.pid)); setTimeout(() => {}, 60000)", pidFile],
+        { signal, timeoutMs: 60000 }),
+      { timeoutMs: 10000, what: 'inner work' }),
+      { timeoutMs: 300, what: 'outer work' }),
+      /Timed out after 300ms waiting for: outer work/,
+    );
+    assertWithinDeadline(Date.now() - started, 300);
+    assertGone(Number(readFileSync(pidFile, 'utf8')), 'nested child');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test('a child process that outlives its timeout is killed and reports the timeout', async () => {
   const result = await run(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { timeoutMs: 300 });
@@ -51,9 +114,8 @@ test('a long-lived child under a polling deadline is terminated before pollUntil
       { timeoutMs: 1000, what: 'long child' }),
       /Timed out after 1000ms waiting for: long child/,
     );
-    assert.ok(Date.now() - started < 5000, 'the poll must fail by its own bound');
-    const pid = Number(readFileSync(pidFile, 'utf8'));
-    assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+    assertWithinDeadline(Date.now() - started, 1000);
+    assertGone(Number(readFileSync(pidFile, 'utf8')), 'long-lived child');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
