@@ -66,7 +66,8 @@ with an argument array, and asserts the stderr contains `READONLY` or `readonly`
 
 **GREEN.**
 1. Create `infra/clickhouse/users.d/dashboard-reader.xml`: user `dashboard_reader`, password
-   `changeme-local-only`, profile `dashboard_readonly` with `readonly = 1` and `allow_databases = signalforge`.
+   `changeme-local-only`, profile `dashboard_readonly` with `readonly = 1`, and `allow_databases` limited to
+   `signalforge` inside the `dashboard_reader` user definition (ClickHouse 24.8 rejects it in the profile).
 2. Add `../clickhouse/users.d/dashboard-reader.xml:/etc/clickhouse-server/users.d/dashboard-reader.xml:ro` to the
    `clickhouse` service volumes in `infra/docker/docker-compose.yml`. Mount only that file read-only: the
    ClickHouse entrypoint writes `default-user.xml` into `users.d` at startup, so the directory must stay writable.

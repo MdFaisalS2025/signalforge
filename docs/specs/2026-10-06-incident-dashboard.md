@@ -365,7 +365,9 @@ read-only part.
 `infra/clickhouse/users.d/dashboard-reader.xml` defines:
 
 - user `dashboard_reader` with password `changeme-local-only` (local only);
-- profile `dashboard_readonly` with `readonly = 1` and `allow_databases` limited to `signalforge`;
+- profile `dashboard_readonly` with `readonly = 1`;
+- `allow_databases` limited to `signalforge`, set in the `dashboard_reader` user definition (not in the profile,
+  which ClickHouse 24.8 rejects);
 - no network restriction beyond the default Compose network.
 
 The default user and its existing behavior are unchanged. The collector keeps using `default`.
