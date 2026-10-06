@@ -354,8 +354,13 @@ A ClickHouse users file is mounted into the `clickhouse` service:
 clickhouse:
   volumes:
     - clickhouse-data:/var/lib/clickhouse
-    - ../clickhouse/users.d:/etc/clickhouse-server/users.d:ro
+    - ../clickhouse/users.d/dashboard-reader.xml:/etc/clickhouse-server/users.d/dashboard-reader.xml:ro
 ```
+
+Only the dashboard reader file is mounted, and it is mounted read-only. The whole `users.d` directory is not.
+The ClickHouse image's entrypoint writes `default-user.xml` into `users.d` at every start, so a read-only
+directory mount stops the server at startup. The directory must stay writable; the single file is the only
+read-only part.
 
 `infra/clickhouse/users.d/dashboard-reader.xml` defines:
 

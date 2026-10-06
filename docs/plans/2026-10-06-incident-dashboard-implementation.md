@@ -67,8 +67,9 @@ with an argument array, and asserts the stderr contains `READONLY` or `readonly`
 **GREEN.**
 1. Create `infra/clickhouse/users.d/dashboard-reader.xml`: user `dashboard_reader`, password
    `changeme-local-only`, profile `dashboard_readonly` with `readonly = 1` and `allow_databases = signalforge`.
-2. Add `../clickhouse/users.d:/etc/clickhouse-server/users.d:ro` to the `clickhouse` service volumes in
-   `infra/docker/docker-compose.yml`.
+2. Add `../clickhouse/users.d/dashboard-reader.xml:/etc/clickhouse-server/users.d/dashboard-reader.xml:ro` to the
+   `clickhouse` service volumes in `infra/docker/docker-compose.yml`. Mount only that file read-only: the
+   ClickHouse entrypoint writes `default-user.xml` into `users.d` at startup, so the directory must stay writable.
 3. Restart ClickHouse: `docker compose -f infra/docker/docker-compose.yml up -d clickhouse`. Do not use `-v`.
 4. Re-run the test: the insert now fails with `READONLY`.
 5. Also verify, by hand, that `SELECT count() FROM signalforge.incidents` succeeds as `dashboard_reader`.
