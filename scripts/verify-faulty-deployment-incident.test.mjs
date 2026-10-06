@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseSinglePartitionHighWatermark, compareExactTraceSets } from './verify-faulty-deployment-incident.mjs';
+import { parseSinglePartitionHighWatermark, compareExactTraceSets, parseConsumerGroupSummary } from './verify-faulty-deployment-incident.mjs';
 
 test('identical trace sets match regardless of order', () => {
   assert.equal(compareExactTraceSets(['b', 'a', 'c'], ['a', 'c', 'b']).equal, true);
@@ -60,4 +60,40 @@ test('rejects output with multiple partition rows', () => {
 test('rejects a nonzero partition', () => {
   const text = CAPTURED.replace(/^0 /m, '1 ');
   assert.throws(() => parseSinglePartitionHighWatermark(text), /expected partition 0/);
+});
+
+// Captured from: rpk group describe collector-go-normalizer -s (RPK v24.2.7). The BALANCER value is empty.
+const SUMMARY_EMPTY = [
+  'GROUP        collector-go-normalizer',
+  'COORDINATOR  0',
+  'STATE        Empty',
+  'BALANCER     ',
+  'MEMBERS      0',
+  'TOTAL-LAG    0',
+  '',
+].join('\n');
+
+test('a Stable group with one member parses to its state and count', () => {
+  const text = SUMMARY_EMPTY.replace('Empty', 'Stable').replace('MEMBERS      0', 'MEMBERS      1');
+  assert.deepEqual(parseConsumerGroupSummary(text), { state: 'Stable', members: 1 });
+});
+
+test('a PreparingRebalance group with several members parses but reports its own state', () => {
+  const text = SUMMARY_EMPTY.replace('Empty', 'PreparingRebalance').replace('MEMBERS      0', 'MEMBERS      2');
+  assert.deepEqual(parseConsumerGroupSummary(text), { state: 'PreparingRebalance', members: 2 });
+});
+
+test('output without a STATE line is rejected with a clear error', () => {
+  const text = SUMMARY_EMPTY.replace(/STATE.*\n/, '');
+  assert.throws(() => parseConsumerGroupSummary(text), /no STATE line/);
+});
+
+test('output without a MEMBERS line is rejected with a clear error', () => {
+  const text = SUMMARY_EMPTY.replace(/MEMBERS.*\n/, '');
+  assert.throws(() => parseConsumerGroupSummary(text), /no MEMBERS line/);
+});
+
+test('a non-numeric member count is rejected', () => {
+  const text = SUMMARY_EMPTY.replace('MEMBERS      0', 'MEMBERS      many');
+  assert.throws(() => parseConsumerGroupSummary(text), /MEMBERS is not numeric/);
 });

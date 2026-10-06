@@ -127,6 +127,38 @@ export async function highWatermark(topic) {
   return parseSinglePartitionHighWatermark(result.stdout);
 }
 
+// parseConsumerGroupSummary reads `rpk group describe <group> -s` output and returns the group state and
+// member count. It rejects output that lacks either line, or whose member count is not a number.
+export function parseConsumerGroupSummary(summaryOutput) {
+  const lines = summaryOutput.split('\n').map((line) => line.trim());
+  const stateLine = lines.find((line) => /^STATE\s+\S+$/.test(line));
+  if (!stateLine) throw new Error('group summary has no STATE line');
+  const membersLine = lines.find((line) => /^MEMBERS\s+\S+$/.test(line));
+  if (!membersLine) throw new Error('group summary has no MEMBERS line');
+  const members = membersLine.split(/\s+/)[1];
+  if (!/^\d+$/.test(members)) throw new Error(`MEMBERS is not numeric: ${members}`);
+  return { state: stateLine.split(/\s+/)[1], members: Number(members) };
+}
+
+// describeNormalizerGroupSummary runs the read-only summary command. A command failure throws, so a failed
+// read is never mistaken for an empty or stable group.
+async function describeNormalizerGroupSummary() {
+  const result = await compose([
+    'exec', '-T', 'redpanda', 'rpk', 'group', 'describe', 'collector-go-normalizer', '-s', '--brokers', 'redpanda:9092',
+  ]);
+  if (result.code !== 0) throw new Error(`rpk group describe failed: ${result.stderr.trim()}`);
+  return parseConsumerGroupSummary(result.stdout);
+}
+
+// waitForNormalizerGroupStable polls once a second for at most 120 seconds until collector-go-normalizer is
+// Stable with exactly one member. It deletes and alters nothing.
+export async function waitForNormalizerGroupStable() {
+  return pollUntil(async () => {
+    const summary = await describeNormalizerGroupSummary();
+    return summary.state === 'Stable' && summary.members === 1 ? summary : null;
+  }, { intervalMs: 1000, timeoutMs: 120_000, what: 'collector-go-normalizer stable with one member' });
+}
+
 // consumeFromOffset reads one record from an exact numeric offset, bounded by timeoutMs. It does not
 // depend on consumer attachment timing, because the record is retained at that offset.
 export function consumeFromOffset(topic, offset, timeoutMs) {
@@ -165,6 +197,7 @@ export async function setCollectorHooks({ failAttempts, crash }) {
   await pollUntil(async () => (await containerState(COLLECTOR_CONTAINER)).startsWith('running'), {
     ...CONTAINER_WAIT, what: 'collector-go running',
   });
+  await waitForNormalizerGroupStable();
 }
 
 // deployFaulty deploys demo-payments with fault mode enabled and returns the printed deployment ID.
