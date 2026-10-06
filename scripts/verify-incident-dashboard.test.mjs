@@ -57,6 +57,25 @@ test('dashboard_reader cannot insert into incidents', async () => {
   assert.match(result.stderr, /READONLY|readonly/, `expected a read-only rejection, got: ${result.stderr.trim()}`);
 });
 
+// The reader is scoped to signalforge. The probe reads system.query_log, a table that holds data and is not
+// filtered by database scope. Verified on the running stack: the server answers with ACCESS_DENIED (code 497).
+// The probe writes nothing. A nonzero exit alone is not enough, because a bad password would also exit nonzero,
+// so the rejection must name a privilege error.
+test('dashboard_reader is denied a read of system.query_log', async () => {
+  const result = await clickhouse(READER, READER_PASSWORD, ['--query', 'SELECT count() FROM system.query_log']);
+  assert.notEqual(result.code, 0, `read of system.query_log was allowed for ${READER}: ${result.stdout.trim()}`);
+  assert.match(result.stderr, /ACCESS_DENIED|Not enough privileges/,
+    `expected an access-denied rejection, got: ${result.stderr.trim()}`);
+});
+
+// system.tables is readable, but only for the account's own databases. Any row outside signalforge is a scope leak.
+test('dashboard_reader sees no catalog entries outside signalforge', async () => {
+  const result = await clickhouse(READER, READER_PASSWORD,
+    ['--query', "SELECT count() FROM system.tables WHERE database != 'signalforge'"]);
+  assert.equal(result.code, 0, `catalog read failed: ${result.stderr.trim()}`);
+  assert.equal(result.stdout.trim(), '0', `catalog exposes ${result.stdout.trim()} entries outside signalforge`);
+});
+
 test('dashboard_reader cannot insert into deployments', async () => {
   const result = await clickhouse(READER, READER_PASSWORD,
     ['--query', 'INSERT INTO signalforge.deployments (deployment_id) VALUES (generateUUIDv4())']);
