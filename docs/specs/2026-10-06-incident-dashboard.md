@@ -114,7 +114,10 @@ LIMIT {limit:UInt32}
 **Q2 one incident**
 
 ```sql
-SELECT ... FROM incidents FINAL WHERE incident_id = {incident_id:UUID}
+SELECT incident_id, revision, title, status, severity, service, environment, deployment_id,
+       trigger_rule, started_at, detected_at, publication_state, published_at
+FROM incidents FINAL
+WHERE incident_id = {incident_id:UUID}
 ```
 
 **Q3 evidence for one incident**

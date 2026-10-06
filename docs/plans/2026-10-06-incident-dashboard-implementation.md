@@ -113,7 +113,8 @@ parameters, and has no other `{` placeholder or template interpolation. Both fai
 **GREEN.**
 1. `validate.ts` exports `parseIncidentId(input)` and `parseLimit(input, { fallback, max })`. Each returns the
    value or throws `InvalidInput` with the field name.
-2. `queries.ts` exports the seven query strings from spec 5.2 as constants, plus a `params` type for each.
+2. `queries.ts` exports the seven query strings from spec 5.2 as constants, plus a `params` type for each. Q2 selects
+   the same explicit incident-column list as Q1, not a wildcard.
 
 **Commit:** `feat(web): validate dashboard inputs and build bounded queries`
 
