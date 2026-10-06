@@ -1,4 +1,5 @@
-/* Design tokens from docs/specs/2026-10-06-incident-dashboard.md, section 4. */
+/* Design tokens from docs/specs/2026-10-06-incident-dashboard.md, section 4.
+   Each color has one meaning. Blue marks focus and the selected rail entry only. */
 :root {
   --bg: #0f1216;
   --surface: #161b22;
@@ -19,4 +20,208 @@ body {
   color: var(--text);
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
   font-size: 13px;
+  line-height: 1.4;
+}
+
+a {
+  color: var(--text);
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+h1 {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0;
+}
+
+button {
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.mono {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+/* Frame: left rail, content beside it. */
+.shell {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+.rail {
+  background: var(--surface);
+  border-right: 1px solid var(--hairline);
+  padding: 16px 12px;
+}
+
+.brand {
+  font-weight: 600;
+  padding: 4px 8px 16px;
+}
+
+.rail nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.rail nav a {
+  color: var(--muted);
+  text-decoration: none;
+  padding: 6px 8px;
+  border-radius: 4px;
+}
+
+.rail nav a:hover {
+  color: var(--text);
+}
+
+.rail nav a[aria-current="page"] {
+  color: var(--text);
+  background: var(--bg);
+  box-shadow: inset 2px 0 0 var(--focus);
+}
+
+.content {
+  padding: 16px 24px;
+  min-width: 0;
+}
+
+.page-header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.count {
+  color: var(--muted);
+}
+
+/* Dense table. Wide content scrolls inside its own wrapper, never the page. */
+.table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--hairline);
+  white-space: nowrap;
+}
+
+td {
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--hairline);
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+tr:last-child td {
+  border-bottom: 0;
+}
+
+/* Status is a dot plus a word. The dot takes the signal color; the word stays readable. */
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex: none;
+}
+
+.status[data-severity="high"] .dot {
+  background: var(--high);
+}
+
+.status[data-publication="pending"] .dot {
+  background: var(--high);
+}
+
+.status[data-publication="published"] .dot {
+  background: var(--healthy);
+}
+
+/* Loading placeholders are static blocks. There is no animation. */
+.skeleton {
+  display: inline-block;
+  height: 10px;
+  width: 70%;
+  background: var(--hairline);
+  border-radius: 2px;
+}
+
+.notice {
+  padding: 24px;
+  color: var(--muted);
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+}
+
+.notice p {
+  margin: 0 0 8px;
+}
+
+.notice p:last-child {
+  margin-bottom: 0;
+}
+
+/* Below 960px the rail becomes a top bar with the three sections inline. */
+@media (max-width: 959px) {
+  .shell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .rail {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 8px 16px;
+    border-right: 0;
+    border-bottom: 1px solid var(--hairline);
+  }
+
+  .brand {
+    padding: 0;
+  }
+
+  .rail nav {
+    flex-direction: row;
+  }
+
+  .content {
+    padding: 12px 16px;
+  }
 }
