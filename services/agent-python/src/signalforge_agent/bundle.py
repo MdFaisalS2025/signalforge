@@ -151,12 +151,42 @@ class EvidenceBundle:
     def evidence_ids(self) -> frozenset:
         return frozenset(row.evidence_id for row in self.evidence)
 
-    def allowed_tokens(self) -> frozenset:
-        """Identifiers and constants a validated sentence may mention: the ones this bundle actually holds.
+    def burst_duration_ns(self) -> Optional[int]:
+        """Last minus first failure time across the followed traces' evidence rows, in integer nanoseconds.
 
-        Only retained evidence counts, so an identifier the cap dropped, an uncited trace, or another incident's ID is
-        not a token. The numbers an analyzer computes (such as a time delta) are added by the grounding layer, which
-        owns how they are rendered.
+        None unless at least two traces are followed, because one point does not define a duration. Only retained
+        evidence timestamps are used: never dropped rows, uncited traces, or telemetry.
+        """
+        times = self._followed_failure_ns()
+        return max(times) - min(times) if len(times) >= 2 else None
+
+    def first_failure_delay_ns(self) -> Optional[int]:
+        """Deployment time to the earliest followed failure, in integer nanoseconds.
+
+        None when there is no deployment row, no followed trace, or the first failure is not after the deployment
+        instant: a negative duration is never reported.
+        """
+        times = self._followed_failure_ns()
+        if self.deployment is None or not times:
+            return None
+        delay = min(times) - _epoch_ns(self.deployment.timestamp)
+        return delay if delay >= 0 else None
+
+    def _followed_failure_ns(self) -> list:
+        timestamps = {row.evidence_id: row.timestamp for row in self.evidence}
+        return [_epoch_ns(timestamps[trace.evidence_id]) for trace in self.traces]
+
+    def allowed_tokens(self) -> frozenset:
+        """Identifiers, timestamps, numbers, and constants a validated sentence may mention.
+
+        Everything here comes from this bundle's retained evidence, so an identifier or timestamp the cap dropped, an
+        uncited trace, a log or span time, or another incident's ID is not a token:
+
+        - the incident, evidence, deployment, and followed-trace identifiers, and the deployment version;
+        - every retained evidence timestamp, rendered exactly as in the canonical bundle (nine fractional digits, Z);
+        - the evidence count, the burst duration, and the deployment-to-first-failure delay, each rendered by
+          format_seconds and present only when the bundle can define it;
+        - the detection-rule constants 30 and 300.
         """
         tokens = {self.incident.incident_id, str(len(self.evidence)), *RULE_CONSTANT_TOKENS}
         if self.incident.deployment_id:
@@ -164,11 +194,15 @@ class EvidenceBundle:
         for row in self.evidence:
             tokens.add(row.evidence_id)
             tokens.add(row.source_ref)
+            tokens.add(row.timestamp)
         if self.deployment is not None:
             tokens.add(self.deployment.deployment_id)
             tokens.add(self.deployment.new_version)
         for trace in self.traces:
             tokens.add(trace.trace_id)
+        for nanoseconds in (self.burst_duration_ns(), self.first_failure_delay_ns()):
+            if nanoseconds is not None:
+                tokens.add(format_seconds(nanoseconds))
         return frozenset(tokens)
 
 
@@ -194,6 +228,35 @@ def to_api_timestamp(value: str) -> str:
     except ValueError:
         raise ValueError("timestamp is not a valid date and time") from None
     return f"{year}-{month}-{day}T{hour}:{minute}:{second}.{nanos}Z"
+
+
+_NANOS_PER_SECOND = 1_000_000_000
+_NANOS_PER_TENTH = 100_000_000
+_EPOCH_ORDINAL = datetime.date(1970, 1, 1).toordinal()
+
+
+def _epoch_ns(api_timestamp: str) -> int:
+    """Whole nanoseconds since 1970-01-01T00:00:00Z for an API timestamp. Integer arithmetic only: no floats."""
+    match = _API_TIMESTAMP.fullmatch(api_timestamp)
+    if match is None:
+        raise ValueError("timestamp is not in the API format")
+    year, month, day, hour, minute, second, nanos = (int(part) for part in match.groups())
+    days = datetime.date(year, month, day).toordinal() - _EPOCH_ORDINAL
+    seconds = ((days * 24 + hour) * 60 + minute) * 60 + second
+    return seconds * _NANOS_PER_SECOND + nanos
+
+
+def format_seconds(nanoseconds: int) -> str:
+    """Render a non-negative duration in integer nanoseconds as seconds with one decimal, rounding half up.
+
+    Pure integer arithmetic, so the result is exact for any size and never depends on float behavior or on banker's
+    rounding: 4_552_000_000 is "4.6", 4_550_000_000 is "4.6", 102_000_000 is "0.1", and 0 is "0.0". The analyzer and
+    the token set both use this one function, so a sentence and its allowed numbers always agree.
+    """
+    if isinstance(nanoseconds, bool) or not isinstance(nanoseconds, int) or nanoseconds < 0:
+        raise ValueError("nanoseconds must be a non-negative integer")
+    tenths = (nanoseconds + _NANOS_PER_TENTH // 2) // _NANOS_PER_TENTH
+    return f"{tenths // 10}.{tenths % 10}"
 
 
 def _text(row: Mapping, key: str, kind: str) -> str:

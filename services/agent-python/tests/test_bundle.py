@@ -1,10 +1,14 @@
+import ast
 import copy
 import dataclasses
+import inspect
 import json
 import random
+import re
 import unittest
 from pathlib import Path
 
+from signalforge_agent import bundle as bundle_module
 from signalforge_agent.bundle import BundleTooLarge, EvidenceBundle, RawIncidentData, build_bundle, to_api_timestamp
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -576,6 +580,242 @@ class MalformedInputTest(unittest.TestCase):
         raw.spans.append({"trace_id": STRAY_TRACE_ID, "garbage": self.MARKER})
         raw.logs.append({"trace_id": STRAY_TRACE_ID, "garbage": self.MARKER})
         self.assertNotIn(self.MARKER, build_bundle(raw).canonical_json())
+
+
+ISO_TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{9}Z")
+ONE_DECIMAL = re.compile(r"\d+\.\d")
+
+DEPLOY_TS = "2026-10-07T21:49:26.436000000Z"
+EVIDENCE_TIMESTAMPS = {
+    DEPLOY_TS,
+    "2026-10-07T21:49:30.988000000Z",
+    "2026-10-07T21:49:31.046000000Z",
+    "2026-10-07T21:49:31.090000000Z",
+}
+
+
+def timestamps_in(tokens):
+    return {token for token in tokens if ISO_TIMESTAMP.fullmatch(token)}
+
+
+def decimals_in(tokens):
+    return {token for token in tokens if ONE_DECIMAL.fullmatch(token)}
+
+
+def trace_rows(raw):
+    return [row for row in raw.evidence if row["source_type"] == "trace"]
+
+
+class DerivedTokensTest(unittest.TestCase):
+    """allowed_tokens() also holds the rendered evidence timestamps and the numbers the bundle can derive."""
+
+    def tokens(self, name="faulty_deploy_full"):
+        return build_bundle(load_raw(name)).allowed_tokens()
+
+    def test_the_full_fixture_includes_timestamps_count_durations_and_rule_constants(self):
+        tokens = self.tokens()
+        for timestamp in sorted(EVIDENCE_TIMESTAMPS):
+            self.assertIn(timestamp, tokens)
+        for number in ("4", "0.1", "4.6", "30", "300"):
+            self.assertIn(number, tokens)
+
+    def test_the_rendered_timestamps_are_exactly_the_canonical_bundle_rendering(self):
+        bundle = build_bundle(load_raw())
+        for timestamp in timestamps_in(bundle.allowed_tokens()):
+            self.assertIn(timestamp, bundle.canonical_json())
+
+    def test_the_timestamp_tokens_are_exactly_the_retained_evidence_timestamps(self):
+        # Not the incident's detected_at, not a span or log timestamp, not an uncited trace's timestamp.
+        self.assertEqual(timestamps_in(self.tokens()), EVIDENCE_TIMESTAMPS)
+
+    def test_a_log_span_or_uncited_timestamp_is_never_a_token(self):
+        tokens = self.tokens()
+        for never in ("2026-10-07T21:49:33.681717455Z", "2026-10-07T21:49:30.986000000Z", "2026-10-07T21:49:31.500000000Z"):
+            self.assertNotIn(never, tokens)
+
+    def test_the_only_decimals_are_the_burst_and_the_delay(self):
+        self.assertEqual(decimals_in(self.tokens()), {"0.1", "4.6"})
+
+    def test_a_delay_of_exactly_400_seconds_renders_as_400_point_0(self):
+        tokens = self.tokens("late_failure")
+        self.assertIn("400.0", tokens)
+        self.assertIn("0.1", tokens)
+        self.assertEqual(decimals_in(tokens), {"0.1", "400.0"})
+
+    def test_values_come_from_evidence_rows_not_telemetry(self):
+        self.assertEqual(self.tokens("faulty_deploy_no_telemetry"), self.tokens("faulty_deploy_full"))
+
+    def test_a_missing_deployment_invents_no_delay_but_keeps_the_burst_and_evidence_timestamps(self):
+        tokens = self.tokens("deployment_missing")
+        self.assertNotIn("4.6", tokens)
+        self.assertIn("0.1", tokens)
+        self.assertEqual(decimals_in(tokens), {"0.1"})
+        self.assertEqual(timestamps_in(tokens), EVIDENCE_TIMESTAMPS)
+
+    def test_two_trace_rows_define_a_burst(self):
+        tokens = self.tokens("two_traces_only")
+        self.assertEqual(decimals_in(tokens), {"0.1", "4.6"})  # 0.058 seconds rounds half up to 0.1
+        self.assertEqual(len(timestamps_in(tokens)), 3)
+
+    def test_one_trace_row_defines_no_burst(self):
+        raw = load_raw()
+        keep = trace_rows(raw)[0]["evidence_id"]
+        raw.evidence = [row for row in raw.evidence if row["source_type"] != "trace" or row["evidence_id"] == keep]
+        tokens = build_bundle(raw).allowed_tokens()
+        self.assertEqual(decimals_in(tokens), {"4.6"})
+        self.assertIn("2", tokens, "the evidence count is the deployment row plus the one trace row")
+
+    def test_no_trace_rows_means_no_derived_numbers_at_all(self):
+        raw = load_raw()
+        raw.evidence = [row for row in raw.evidence if row["source_type"] != "trace"]
+        tokens = build_bundle(raw).allowed_tokens()
+        self.assertEqual(decimals_in(tokens), set())
+        self.assertEqual(timestamps_in(tokens), {DEPLOY_TS})
+        self.assertIn("1", tokens)
+
+    def test_no_evidence_at_all_has_no_timestamps_or_derived_numbers(self):
+        raw = load_raw("faulty_deploy_no_telemetry")
+        raw.evidence = []
+        raw.deployment = None
+        tokens = build_bundle(raw).allowed_tokens()
+        self.assertEqual(timestamps_in(tokens), set())
+        self.assertEqual(decimals_in(tokens), set())
+        self.assertIn("0", tokens)
+        self.assertEqual(tokens, frozenset({INCIDENT_ID, DEPLOYMENT_ID, "0", "30", "300"}))
+
+    def test_three_failures_at_one_instant_have_a_burst_of_zero(self):
+        raw = load_raw()
+        for row in trace_rows(raw):
+            row["timestamp"] = "2026-10-07 21:49:31.000000000"
+        tokens = build_bundle(raw).allowed_tokens()
+        self.assertIn("0.0", tokens)
+
+    def test_a_failure_before_the_deployment_has_no_delay(self):
+        raw = load_raw()
+        raw.deployment["timestamp"] = "2026-10-07 21:49:40.000000000"
+        tokens = build_bundle(raw).allowed_tokens()
+        self.assertEqual(decimals_in(tokens), {"0.1"})
+        self.assertFalse(any(token.startswith("-") for token in tokens))
+
+    def test_a_failure_at_the_deployment_instant_has_a_delay_of_zero(self):
+        raw = load_raw()
+        raw.deployment["timestamp"] = "2026-10-07 21:49:30.988000000"
+        tokens = build_bundle(raw).allowed_tokens()
+        self.assertIn("0.0", tokens)
+
+    def test_the_delay_uses_the_earliest_followed_failure(self):
+        raw = load_raw()
+        random.Random(11).shuffle(raw.evidence)
+        self.assertEqual(build_bundle(raw).first_failure_delay_ns(), 4_552_000_000)
+
+    def test_dropped_evidence_contributes_no_timestamp_or_number(self):
+        raw = load_raw()
+        for n in range(5):
+            raw.evidence.append(trace_evidence(700 + n, clickhouse_ts(10 + n, 0)))
+        tokens = build_bundle(raw).allowed_tokens()
+        self.assertIn("2026-10-07T21:50:13.000000000Z", tokens, "a retained row's timestamp is a token")
+        self.assertNotIn("2026-10-07T21:50:14.000000000Z", tokens, "the dropped ninth row's timestamp is not")
+        self.assertEqual(decimals_in(tokens), {"0.1", "4.6"})
+        self.assertIn("8", tokens)
+
+    def test_a_trace_that_is_not_followed_does_not_widen_the_burst(self):
+        raw = load_raw()
+        raw.evidence.append(trace_evidence(800, clickhouse_ts(30, 0)))
+        bundle = build_bundle(raw)
+        self.assertEqual(len(bundle.traces), 3)
+        self.assertEqual(bundle.burst_duration_ns(), 102_000_000)
+        self.assertEqual(decimals_in(bundle.allowed_tokens()), {"0.1", "4.6"})
+
+    def test_tokens_are_stable_when_the_raw_rows_are_reordered(self):
+        raw = load_raw()
+        reference = build_bundle(raw).allowed_tokens()
+        for seed in range(25):
+            evidence, spans, logs = list(raw.evidence), list(raw.spans), list(raw.logs)
+            rng = random.Random(seed)
+            for rows in (evidence, spans, logs):
+                rng.shuffle(rows)
+            rebuilt = RawIncidentData(raw.incident, evidence, raw.deployment, spans, logs)
+            self.assertEqual(build_bundle(rebuilt).allowed_tokens(), reference, f"seed {seed}")
+
+    def test_the_duration_methods_report_integer_nanoseconds_or_none(self):
+        full = build_bundle(load_raw())
+        self.assertEqual(full.burst_duration_ns(), 102_000_000)
+        self.assertEqual(full.first_failure_delay_ns(), 4_552_000_000)
+        self.assertIsInstance(full.burst_duration_ns(), int)
+        self.assertIsNone(build_bundle(load_raw("deployment_missing")).first_failure_delay_ns())
+        one = load_raw()
+        keep = trace_rows(one)[0]["evidence_id"]
+        one.evidence = [row for row in one.evidence if row["source_type"] != "trace" or row["evidence_id"] == keep]
+        self.assertIsNone(build_bundle(one).burst_duration_ns())
+
+    def test_the_derived_numbers_agree_with_the_format_helper(self):
+        bundle = build_bundle(load_raw())
+        tokens = bundle.allowed_tokens()
+        self.assertIn(bundle_module.format_seconds(bundle.burst_duration_ns()), tokens)
+        self.assertIn(bundle_module.format_seconds(bundle.first_failure_delay_ns()), tokens)
+
+
+class FormatSecondsTest(unittest.TestCase):
+    def test_the_published_half_up_contract(self):
+        self.assertEqual(bundle_module.format_seconds(4_552_000_000), "4.6")
+        self.assertEqual(bundle_module.format_seconds(4_550_000_000), "4.6")
+        self.assertEqual(bundle_module.format_seconds(102_000_000), "0.1")
+        self.assertEqual(bundle_module.format_seconds(0), "0.0")
+
+    def test_boundaries_round_half_up_never_half_even(self):
+        cases = {
+            49_999_999: "0.0",
+            50_000_000: "0.1",
+            149_999_999: "0.1",
+            150_000_000: "0.2",
+            250_000_000: "0.3",  # half-even would give 0.2
+            350_000_000: "0.4",
+            4_549_999_999: "4.5",
+            4_550_000_001: "4.6",
+            9_950_000_000: "10.0",
+            400_000_000_000: "400.0",
+            1_000_000_000: "1.0",
+        }
+        for nanoseconds, expected in cases.items():
+            with self.subTest(nanoseconds=nanoseconds):
+                self.assertEqual(bundle_module.format_seconds(nanoseconds), expected)
+
+    def test_values_beyond_float_precision_are_exact(self):
+        wide = 10**30
+        self.assertEqual(bundle_module.format_seconds(wide + 49_999_999), "1" + "0" * 21 + ".0")
+        self.assertEqual(bundle_module.format_seconds(wide + 50_000_000), "1" + "0" * 21 + ".1")
+
+    def test_only_non_negative_integers_are_accepted(self):
+        for bad in (-1, -50_000_000, True, False, 1.5, 4.0, "100", None, b"1"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    bundle_module.format_seconds(bad)  # type: ignore[arg-type]
+
+
+class IntegerArithmeticTest(unittest.TestCase):
+    """The duration code must be integer-only: no true division, no float, no rounding builtin, no Decimal."""
+
+    FUNCTIONS = ("format_seconds", "_epoch_ns", "burst_duration_ns", "first_failure_delay_ns")
+
+    def test_the_duration_functions_use_no_floating_point_or_rounding(self):
+        tree = ast.parse(inspect.getsource(bundle_module))
+        found = {node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+        for name in self.FUNCTIONS:
+            with self.subTest(function=name):
+                self.assertIn(name, found, f"{name} must exist")
+                for node in ast.walk(found[name]):
+                    self.assertNotIsInstance(node, ast.Div, "true division produces floats")
+                    if isinstance(node, ast.Constant):
+                        self.assertNotIsInstance(node.value, float)
+                    if isinstance(node, ast.Name):
+                        self.assertNotIn(node.id, {"float", "round", "Decimal", "Fraction"})
+
+    def test_the_module_imports_nothing_numeric_beyond_the_standard_integer_toolkit(self):
+        tree = ast.parse(inspect.getsource(bundle_module))
+        imported = {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
+        imported |= {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
+        self.assertFalse(imported & {"decimal", "fractions", "math", "numpy", "random", "time", "os"})
+        self.assertFalse({name for name in imported if name and "grounding" in name}, "no import of the future grounding layer")
 
 
 if __name__ == "__main__":

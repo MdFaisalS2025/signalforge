@@ -151,5 +151,36 @@ class InputDigestTest(unittest.TestCase):
             self.assertTrue(re.fullmatch(r"sha256:[0-9a-f]{64}", digest))
 
 
+class FixtureDigestPinTest(unittest.TestCase):
+    """What reaches an analyzer or provider must not change by accident.
+
+    These values were computed from the bundle as first committed (f1e5afa). A later change to the canonical bundle
+    shape or contents changes them on purpose, and then this table is updated in the same commit that says why.
+    """
+
+    PINNED = {
+        "faulty_deploy_full": ("sha256:09423073efb7cfb0448805bb01d67d2d4f30bd045916d818244e090ae5e94744", 3365),
+        "faulty_deploy_no_telemetry": ("sha256:8a82eeadf7692e74fa344e30cafceec5fb9a291ab22fdbe359517bd02ff9cfa2", 2243),
+        "two_traces_only": ("sha256:0982a6a74d713026231a46b4676157070d42e1865c03e529c50dd3e93c02b418", 2565),
+        "deployment_missing": ("sha256:0a606c0e559e0015bff97eb3db4a7de32c527edc4a3ad7893b63ec420e74076f", 3170),
+        "unknown_rule": ("sha256:6ffc93f45cac576cf966d2d2fa81eeb5bbdd6bde689c1b14b4893f1f7b20e09f", 3344),
+        "late_failure": ("sha256:227cd9790c745fccc390dd849550d392b7678b4c56e75d144cf6c9e838053271", 3365),
+        "prompt_injection_log": ("sha256:2ed75bb6b671bc24ebb9f19dfd4628314e4628f6844ebc67b95f6653ed1bd1e9", 3475),
+    }
+
+    def test_each_fixtures_digest_and_canonical_size_are_pinned(self):
+        for name, (digest, size) in self.PINNED.items():
+            with self.subTest(fixture=name):
+                bundle = build_bundle(load_raw(name))
+                self.assertEqual(input_digest(bundle), digest)
+                self.assertEqual(len(bundle.canonical_json().encode("utf-8")), size)
+
+    def test_computing_the_allowed_tokens_does_not_change_the_digest(self):
+        bundle = build_bundle(load_raw())
+        before = input_digest(bundle)
+        bundle.allowed_tokens()
+        self.assertEqual(input_digest(bundle), before)
+
+
 if __name__ == "__main__":
     unittest.main()
