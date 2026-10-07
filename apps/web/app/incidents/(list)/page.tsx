@@ -1,7 +1,7 @@
-import { IncidentList, type IncidentListState } from '../../src/ui/incident-list';
-import { Shell } from '../../src/ui/shell';
-import { ClickHouseUnavailable } from '../../src/server/clickhouse';
-import { getDashboardService } from '../../src/server/service';
+import { IncidentList, type IncidentListState } from '../../../src/ui/incident-list';
+import { Shell } from '../../../src/ui/shell';
+import { ClickHouseUnavailable } from '../../../src/server/clickhouse';
+import { getDashboardService } from '../../../src/server/service';
 
 // Reads ClickHouse on every request. A static prerender would run at build time, without the environment.
 export const dynamic = 'force-dynamic';

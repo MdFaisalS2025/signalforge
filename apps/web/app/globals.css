@@ -198,6 +198,99 @@ tr:last-child td {
   margin-bottom: 0;
 }
 
+/* Incident detail. The evidence timeline is the one expressive element; the rest stays quiet. */
+.detail h1 {
+  margin: 4px 0 6px;
+}
+
+.detail h2 {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 20px 0 8px;
+}
+
+.crumb {
+  margin: 0;
+  color: var(--muted);
+}
+
+.summary {
+  margin: 0 0 12px;
+  color: var(--muted);
+}
+
+.explanation {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+}
+
+.panel {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 16px;
+  margin: 0 0 8px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+}
+
+.panel dt {
+  color: var(--muted);
+}
+
+.panel dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.warning {
+  margin: 0 0 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--high);
+  border-radius: 4px;
+  color: var(--high);
+}
+
+.timeline-scroll {
+  overflow-x: auto;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+}
+
+.timeline-note {
+  margin: 6px 0 0;
+  color: var(--muted);
+}
+
+.timeline-axis,
+.timeline-stem {
+  stroke: var(--hairline);
+  stroke-width: 2;
+}
+
+.marker-deployment {
+  fill: var(--healthy);
+}
+
+.marker-trace {
+  fill: var(--faulty);
+}
+
+.timeline-label {
+  fill: var(--text);
+}
+
+.timeline-time,
+.timeline-axis-label {
+  fill: var(--muted);
+  font-size: 10px;
+}
+
 /* Below 960px the rail becomes a top bar with the three sections inline. */
 @media (max-width: 959px) {
   .shell {
