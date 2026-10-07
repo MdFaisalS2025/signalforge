@@ -151,6 +151,66 @@ test('the loading state renders five skeleton rows and is announced as busy', ()
   assert.ok(markup.includes('aria-busy="true"'));
 });
 
+// ---- Proportional UTC placement ----
+
+const at = (id: string, time: string) =>
+  deployment({ deployment_id: id, timestamp: `2026-10-06T${time}.000000000Z`, incident_ids: [], class: 'healthy', failing_traces: 0 });
+
+const svgWidth = (markup: string) => Number(/<svg[^>]*width="(\d+(?:\.\d+)?)"/.exec(markup)![1]);
+
+test('markers are placed in proportion to UTC time: 00:00, 00:10, and 01:40 put the middle one at 10%', () => {
+  const markup = loaded([at(D_NEW, '01:40:00'), at(D_OLD, '00:00:00'), at(D_MID, '00:10:00')]);
+  const [first, middle, last] = markers(markup);
+  assert.deepEqual([first.id, middle.id, last.id], [D_OLD, D_MID, D_NEW]);
+  const fraction = (middle.x - first.x) / (last.x - first.x);
+  assert.ok(Math.abs(fraction - 0.1) < 0.01, `middle marker is at ${(fraction * 100).toFixed(1)}% of the axis, expected about 10%`);
+});
+
+test('the first and last markers anchor the two ends of the axis with equal padding', () => {
+  const markup = loaded([at(D_OLD, '00:00:00'), at(D_MID, '00:10:00'), at(D_NEW, '01:40:00')]);
+  const [first, , last] = markers(markup);
+  assert.ok(first.x > 0);
+  assert.ok(Math.abs(first.x - (svgWidth(markup) - last.x)) < 0.5, 'left and right padding must match');
+});
+
+test('nine-digit source timestamps are displayed unchanged while placement uses them', () => {
+  const a = deployment({ deployment_id: D_OLD, timestamp: '2026-10-06T00:00:00.000000001Z', incident_ids: [], class: 'healthy', failing_traces: 0 });
+  const b = deployment({ deployment_id: D_NEW, timestamp: '2026-10-06T00:00:00.999999999Z', incident_ids: [], class: 'healthy', failing_traces: 0 });
+  const markup = loaded([b, a]);
+  assert.ok(markup.includes('2026-10-06T00:00:00.000000001Z') && markup.includes('2026-10-06T00:00:00.999999999Z'));
+  const [first, last] = markers(markup);
+  assert.ok(last.x > first.x, 'sub-second differences still order the markers');
+});
+
+test('the timeline no longer says it is not to scale', () => {
+  assert.ok(!loaded([at(D_OLD, '00:00:00'), at(D_NEW, '01:00:00')]).includes('not to scale'));
+});
+
+test('all-equal timestamps give finite, distinct, increasing positions and invent no times', () => {
+  const same = (id: string) => at(id, '12:00:00');
+  const markup = loaded([same(D_NEW), same(D_OLD), same(D_MID)]);
+  const found = markers(markup);
+  assert.equal(found.length, 3);
+  for (const marker of found) assert.ok(Number.isFinite(marker.x), 'x must be a finite number');
+  for (let i = 1; i < found.length; i += 1) assert.ok(found[i].x - found[i - 1].x >= 20, 'tied markers must not overlap');
+  assert.ok(!markup.includes('NaN'));
+  const shown = new Set(markup.match(/2026-10-06T[\d:.]+Z/g));
+  assert.deepEqual([...shown], ['2026-10-06T12:00:00.000000000Z'], 'only the real time appears');
+});
+
+test('a single deployment is placed without dividing by zero', () => {
+  const markup = loaded([at(D_OLD, '12:00:00')]);
+  assert.ok(Number.isFinite(markers(markup)[0].x));
+  assert.ok(!markup.includes('NaN'));
+});
+
+test('two deployments at the same instant among others are separated, others stay proportional', () => {
+  const markup = loaded([at(D_OLD, '00:00:00'), at(D_MID, '00:10:00'), at(D_NEW, '00:10:00'), at('11111111-1111-4111-8111-111111111111', '01:40:00')]);
+  const found = markers(markup);
+  assert.ok(found[2].x - found[1].x >= 20, 'tied markers must not overlap');
+  assert.ok(Math.abs((found[1].x - found[0].x) / (found[3].x - found[0].x) - 0.1) < 0.02);
+});
+
 test('the loaded header reports how many deployments are shown', () => {
   assert.match(loaded([faulty, healthy]), />2 loaded</);
 });

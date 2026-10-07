@@ -1,7 +1,7 @@
 // The deployment timeline and its table. It renders one of four explicit states from props. It is a server
 // component: hand-built SVG, no charting library, no client state. Timestamps are shown as the API's UTC text,
-// never converted with Date. Markers run oldest to newest, evenly spaced, because deployments can be hours apart
-// and true spacing would crowd the recent ones together.
+// never rewritten. Markers run oldest to newest and are placed in proportion to UTC time, from the earliest to the
+// latest deployment. The timestamps are parsed to exact integer nanoseconds only to compute that placement.
 import type { DeploymentItem } from '../server/model';
 import { classifyDeployment } from '../server/model';
 
@@ -35,6 +35,50 @@ function oldestFirst(deployments: DeploymentItem[]): DeploymentItem[] {
       ? a.timestamp < b.timestamp ? -1 : 1
       : a.deployment_id < b.deployment_id ? -1 : a.deployment_id > b.deployment_id ? 1 : 0,
   );
+}
+
+const API_TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{9})Z$/;
+const TIE_STEP = 24; // markers at the same instant are offset by this much, so none hides another
+
+// Days since 1970-01-01 for a proleptic Gregorian date (Howard Hinnant's algorithm), in whole-number arithmetic.
+function daysFromCivil(year: number, month: number, day: number): number {
+  const y = month <= 2 ? year - 1 : year;
+  const era = Math.floor(y / 400);
+  const yoe = y - era * 400;
+  const doy = Math.floor((153 * (month + (month > 2 ? -3 : 9)) + 2) / 5) + day - 1;
+  const doe = yoe * 365 + Math.floor(yoe / 4) - Math.floor(yoe / 100) + doy;
+  return era * 146097 + doe - 719468;
+}
+
+// Exact nanoseconds since the epoch. Used for placement only; the displayed text is the original string.
+function epochNanos(iso: string): bigint {
+  const match = API_TIMESTAMP.exec(iso);
+  if (!match) throw new TypeError('unexpected API timestamp format');
+  const [year, month, day, hour, minute, second] = match.slice(1, 7).map(Number);
+  const seconds = BigInt(daysFromCivil(year, month, day)) * 86400n + BigInt(hour * 3600 + minute * 60 + second);
+  return seconds * 1_000_000_000n + BigInt(match[7]);
+}
+
+// Positions for deployments already sorted oldest first. The first sits at PAD and the last at width - PAD, with the
+// rest in proportion to time. A tie with the previous marker is offset by TIE_STEP. If every deployment shares one
+// instant there is no time span to scale, so they are spread by GAP in the same deterministic order.
+function place(sorted: DeploymentItem[], width: number): number[] {
+  if (sorted.length === 1) return [width / 2];
+  const times = sorted.map((deployment) => epochNanos(deployment.timestamp));
+  const span = times[times.length - 1] - times[0];
+  if (span === 0n) return sorted.map((_, index) => PAD + index * GAP);
+  const available = width - 2 * PAD;
+  return times.map((time, index) => {
+    const proportional = PAD + Number(((time - times[0]) * BigInt(available * 10)) / span) / 10;
+    return index > 0 && time === times[index - 1] ? Math.round((proportional + TIE_STEP * tieRun(times, index)) * 10) / 10 : Math.round(proportional * 10) / 10;
+  });
+}
+
+// How many markers directly before index share its instant.
+function tieRun(times: bigint[], index: number): number {
+  let run = 0;
+  while (index - run - 1 >= 0 && times[index - run - 1] === times[index]) run += 1;
+  return run;
 }
 
 function Shape({ deployment, x }: { deployment: DeploymentItem; x: number }) {
@@ -97,7 +141,8 @@ function Marker({ deployment, x, index }: { deployment: DeploymentItem; x: numbe
 function Timeline({ deployments }: { deployments: DeploymentItem[] }) {
   const sorted = oldestFirst(deployments);
   const width = Math.max(800, PAD * 2 + (sorted.length - 1) * GAP);
-  const x = (index: number) => PAD + index * GAP;
+  const positions = place(sorted, width);
+  const x = (index: number) => positions[index];
   return (
     <div className="timeline">
       <div className="timeline-scroll">
@@ -109,7 +154,6 @@ function Timeline({ deployments }: { deployments: DeploymentItem[] }) {
           ))}
         </svg>
       </div>
-      <p className="timeline-note">Markers are in UTC order and evenly spaced, not to scale. Read times from the labels.</p>
     </div>
   );
 }
