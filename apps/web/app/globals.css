@@ -291,6 +291,99 @@ tr:last-child td {
   font-size: 10px;
 }
 
+/* Deployment timeline. Healthy is green, faulty is red, unknown is a hollow muted circle. */
+.marker-healthy {
+  fill: var(--healthy);
+}
+
+.marker-faulty {
+  fill: var(--faulty);
+}
+
+.marker-unknown {
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 2;
+}
+
+.marker-incident {
+  fill: var(--high);
+}
+
+.timeline-connector {
+  stroke: var(--faulty);
+  stroke-width: 2;
+}
+
+.timeline-link {
+  fill: var(--text);
+  text-decoration: underline;
+}
+
+.timeline-status {
+  fill: var(--muted);
+  font-size: 11px;
+}
+
+.timeline-status-faulty,
+.count-faulty {
+  fill: var(--faulty);
+  color: var(--faulty);
+}
+
+.status[data-class="faulty"] .dot {
+  background: var(--faulty);
+}
+
+.status[data-class="healthy"] .dot {
+  background: var(--healthy);
+}
+
+.table-wrap + .footnote,
+.timeline + .table-wrap {
+  margin-top: 12px;
+}
+
+.footnote {
+  color: var(--muted);
+  margin: 8px 0 0;
+}
+
+td a + a {
+  margin-left: 8px;
+}
+
+/* Demo commands. Plain preformatted text, so selecting and copying needs no script. */
+.demo h1 {
+  margin-bottom: 4px;
+}
+
+.demo h2 {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 20px 0 6px;
+}
+
+.demo p {
+  margin: 6px 0;
+}
+
+.command {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  overflow-x: auto;
+  user-select: all;
+}
+
+.command code {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 12px;
+  white-space: pre;
+}
+
 /* Below 960px the rail becomes a top bar with the three sections inline. */
 @media (max-width: 959px) {
   .shell {
