@@ -1,0 +1,105 @@
+{
+  "incident": {
+    "incident_id": "5893b198-6ad5-5708-bb7e-a0d2ca4ca323",
+    "revision": "2",
+    "title": "Payments 5xx burst after deployment 57d9bf44-46c0-46e9-8140-4a7b9f3694a8",
+    "status": "open",
+    "severity": "high",
+    "service": "demo-payments",
+    "environment": "local",
+    "deployment_id": "57d9bf44-46c0-46e9-8140-4a7b9f3694a8",
+    "trigger_rule": "payments-5xx-burst-after-deployment",
+    "started_at": "2026-10-07 21:49:30.988000000",
+    "detected_at": "2026-10-07 21:49:33.681717455",
+    "dedup_key": "local|demo-payments|57d9bf44-46c0-46e9-8140-4a7b9f3694a8|payments-5xx-burst-after-deployment",
+    "publication_state": "published",
+    "published_at": "2026-10-07 21:49:34.732000206",
+    "services": [
+      "demo-payments"
+    ]
+  },
+  "evidence": [
+    {
+      "evidence_id": "2b36dac1-5929-5a4f-9c94-5e46d810d714",
+      "source_type": "deployment",
+      "source_ref": "57d9bf44-46c0-46e9-8140-4a7b9f3694a8",
+      "timestamp": "2026-10-07 21:49:26.436000000",
+      "service": "demo-payments",
+      "summary": "demo-payments version 0.2.0-faulty deployed",
+      "reliability": "high",
+      "ingested_at": "2026-10-07 21:49:33.700"
+    },
+    {
+      "evidence_id": "7aa3c142-a1f0-5582-a339-6021113cae07",
+      "source_type": "trace",
+      "source_ref": "eb4c8089a40f3ea443eb8e1943d5f748",
+      "timestamp": "2026-10-07 21:49:30.988000000",
+      "service": "demo-payments",
+      "summary": "demo-payments returned HTTP 500 for trace eb4c8089a40f3ea443eb8e1943d5f748",
+      "reliability": "high",
+      "ingested_at": "2026-10-07 21:49:33.700"
+    },
+    {
+      "evidence_id": "14febb59-2cc7-5b39-a4a8-50f7a886496c",
+      "source_type": "trace",
+      "source_ref": "3e4946423e28e19638784270ccf11595",
+      "timestamp": "2026-10-07 21:49:31.046000000",
+      "service": "demo-payments",
+      "summary": "demo-payments returned HTTP 500 for trace 3e4946423e28e19638784270ccf11595",
+      "reliability": "high",
+      "ingested_at": "2026-10-07 21:49:33.700"
+    }
+  ],
+  "deployment": {
+    "deployment_id": "57d9bf44-46c0-46e9-8140-4a7b9f3694a8",
+    "timestamp": "2026-10-07 21:49:26.436000000",
+    "service": "demo-payments",
+    "environment": "local",
+    "new_version": "0.2.0-faulty",
+    "status": "succeeded",
+    "initiated_by": "deploy-payments-script",
+    "previous_version": "0.1.0-previous-marker"
+  },
+  "spans": [
+    {
+      "timestamp": "2026-10-07 21:49:30.988000000",
+      "trace_id": "eb4c8089a40f3ea443eb8e1943d5f748",
+      "span_id": "b7ad6b7169203331",
+      "deployment_id": "57d9bf44-46c0-46e9-8140-4a7b9f3694a8",
+      "attributes": "{\"span.kind\":\"server\",\"span.name\":\"POST /payments/charge\",\"http.response.status_code\":500,\"order_id\":\"11111111-1111-4111-8111-111111111111\",\"http.request.body\":\"{\\\"item\\\": \\\"demo-keyboard\\\", \\\"note\\\": \\\"RAW-BODY-MARKER-9f2c\\\"}\",\"http.request.header.authorization\":\"Bearer RAW-TOKEN-MARKER-77a1\",\"http.route\":\"/payments/charge\"}"
+    },
+    {
+      "timestamp": "2026-10-07 21:49:31.046000000",
+      "trace_id": "3e4946423e28e19638784270ccf11595",
+      "span_id": "a1c3e5f7092b4d68",
+      "deployment_id": "57d9bf44-46c0-46e9-8140-4a7b9f3694a8",
+      "attributes": "{\"span.kind\":\"server\",\"span.name\":\"POST /payments/charge\",\"http.response.status_code\":500,\"order_id\":\"22222222-2222-4222-8222-222222222222\",\"http.request.body\":\"{\\\"item\\\": \\\"demo-keyboard\\\", \\\"note\\\": \\\"RAW-BODY-MARKER-9f2c\\\"}\",\"http.request.header.authorization\":\"Bearer RAW-TOKEN-MARKER-77a1\",\"http.route\":\"/payments/charge\"}"
+    }
+  ],
+  "logs": [
+    {
+      "timestamp": "2026-10-07 21:49:30.986000000",
+      "trace_id": "eb4c8089a40f3ea443eb8e1943d5f748",
+      "severity": "info",
+      "attributes": "{\"log.body\":\"request received\",\"order_id\":\"11111111-1111-4111-8111-111111111111\",\"status_code\":500}"
+    },
+    {
+      "timestamp": "2026-10-07 21:49:30.988000000",
+      "trace_id": "eb4c8089a40f3ea443eb8e1943d5f748",
+      "severity": "error",
+      "attributes": "{\"log.body\":\"charge failed\",\"order_id\":\"11111111-1111-4111-8111-111111111111\",\"status_code\":500}"
+    },
+    {
+      "timestamp": "2026-10-07 21:49:31.044000000",
+      "trace_id": "3e4946423e28e19638784270ccf11595",
+      "severity": "info",
+      "attributes": "{\"log.body\":\"request received\",\"order_id\":\"22222222-2222-4222-8222-222222222222\",\"status_code\":500}"
+    },
+    {
+      "timestamp": "2026-10-07 21:49:31.046000000",
+      "trace_id": "3e4946423e28e19638784270ccf11595",
+      "severity": "error",
+      "attributes": "{\"log.body\":\"charge failed\",\"order_id\":\"22222222-2222-4222-8222-222222222222\",\"status_code\":500}"
+    }
+  ]
+}
