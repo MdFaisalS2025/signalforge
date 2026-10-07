@@ -297,6 +297,81 @@ fail on purpose, so leave both at `0` for normal use.
 - This is a local demo. It has no authentication, TLS, backups, or monitoring, and it is not a cloud
   or production deployment. Exactly-once Kafka delivery is not claimed.
 
+## Faulty deployment dashboard
+
+A read-only dashboard at `http://localhost:3000` shows the incidents the correlator created, the
+deployment each one is linked to, its four evidence items, and a timeline of recent Payments
+deployments. The design is in
+[docs/specs/2026-10-06-incident-dashboard.md](docs/specs/2026-10-06-incident-dashboard.md).
+
+The dashboard is read-only. The browser never talks to ClickHouse: the Next.js server reads it through a
+server-side layer that uses a read-only ClickHouse account (`dashboard_reader`). Demo data stays in the
+ClickHouse volumes, so incidents from earlier runs remain until you deliberately remove those volumes.
+`docker compose down` without `-v` keeps them.
+
+Run these from the repository root, in order.
+
+**1. Start the slice, including the dashboard.**
+
+```bash
+docker compose -f infra/docker/docker-compose.yml up -d --build redpanda redpanda-init clickhouse otel-collector collector-go demo-orders demo-payments web
+```
+
+Expect `web` to start after ClickHouse is healthy. Open `http://localhost:3000/demo` to confirm.
+
+**2. Create a faulty Payments deployment.**
+
+```bash
+node scripts/deploy-payments.mjs --version 0.2.0-faulty --fault enabled
+```
+
+Expect `deployment_id=<uuid>` in the output. Note the value.
+
+**3. Send three orders.** The fixed order IDs make the demo repeatable on a fresh stack.
+
+```bash
+curl -s -X POST http://localhost:8081/orders -H "content-type: application/json" -d "{\"order_id\":\"11111111-1111-4111-8111-111111111111\",\"item\":\"demo-keyboard\",\"amount_cents\":4999}"
+curl -s -X POST http://localhost:8081/orders -H "content-type: application/json" -d "{\"order_id\":\"22222222-2222-4222-8222-222222222222\",\"item\":\"demo-mouse\",\"amount_cents\":1999}"
+curl -s -X POST http://localhost:8081/orders -H "content-type: application/json" -d "{\"order_id\":\"33333333-3333-4333-8333-333333333333\",\"item\":\"demo-monitor\",\"amount_cents\":19999}"
+```
+
+Each returns HTTP 502 with a `payment_unavailable` reason. That is the expected faulty behavior.
+
+**4. Wait for the incident, then open it.** The correlator runs every second and the publisher follows. Open
+`http://localhost:3000/incidents`. The new row appears after Refresh. Click it to open the detail page.
+
+**5. Restore the healthy version.**
+
+```bash
+node scripts/deploy-payments.mjs --version 0.1.0 --fault disabled
+```
+
+The incident remains, because it is historical. The Deployments page then shows `0.2.0-faulty` as faulty and
+the restored `0.1.0` as the latest deployment.
+
+Running the demo twice on the same stack creates a second deployment and a second incident, because
+deduplication is keyed by deployment. The new incident has the same shape as the first.
+
+**Teardown** keeps volumes:
+
+```bash
+docker compose -f infra/docker/docker-compose.yml down
+```
+
+### Dashboard acceptance
+
+With the stack running and at least one incident present, run the dashboard acceptance check:
+
+```bash
+node scripts/verify-incident-dashboard.mjs
+```
+
+It is read-only and finishes within 60 seconds. It prints one line per check and exits `0` only if all pass.
+It checks health, the incident list, the newest incident's four evidence rows, the faulty deployment
+classification, that `POST`, `PUT`, `PATCH`, and `DELETE` are refused, that the reader account cannot write,
+that the incidents page renders, and that no response leaks SQL or driver errors. To also compare the
+evidence with known trace IDs, add `--expected-traces <id>,<id>,<id>`.
+
 ## Scope and limits
 
 This is a local demo of observability for one synchronous request path, not a
