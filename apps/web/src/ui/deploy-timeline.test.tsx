@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { DeployTimeline, FOOTNOTE, type DeployTimelineState } from './deploy-timeline';
+import { DeployTimeline, FOOTNOTE, LABEL_CHAR_WIDTH, type DeployTimelineState } from './deploy-timeline';
 import type { DeploymentItem } from '../server/model';
 
 // Static rendering only: no browser, no live API, no client state.
@@ -209,6 +209,186 @@ test('two deployments at the same instant among others are separated, others sta
   const found = markers(markup);
   assert.ok(found[2].x - found[1].x >= 20, 'tied markers must not overlap');
   assert.ok(Math.abs((found[1].x - found[0].x) / (found[3].x - found[0].x) - 0.1) < 0.02);
+});
+
+// ---- Label lanes ----
+
+// A cluster: four deployments inside one minute, between an early and a late one, so the cluster's proportional
+// x-positions are only a few pixels apart while their labels are about 200px wide.
+const CLUSTER_IDS = [
+  '11111111-1111-4111-8111-111111111111',
+  '22222222-2222-4222-8222-222222222222',
+  '33333333-3333-4333-8333-333333333333',
+  '44444444-4444-4444-8444-444444444444',
+];
+const INCIDENT_2 = '406a10b6-a366-5554-b8a1-1eb2d9a475d3';
+function clusteredSet(): DeploymentItem[] {
+  const base = (id: string, time: string, extra: Partial<DeploymentItem>) =>
+    deployment({ deployment_id: id, timestamp: `2026-10-06T${time}.000000000Z`, ...extra });
+  return [
+    base(D_OLD, '10:00:00', { class: 'healthy', failing_traces: 0, incident_ids: [], new_version: '0.1.0' }),
+    base(CLUSTER_IDS[0], '14:15:53', { new_version: '0.2.0-faulty' }),
+    base(CLUSTER_IDS[1], '14:15:55', { new_version: '0.3.0-faulty', incident_ids: [INCIDENT_2] }),
+    base(CLUSTER_IDS[2], '14:16:00', { class: 'healthy', failing_traces: 0, incident_ids: [], new_version: '0.1.0' }),
+    base(CLUSTER_IDS[3], '14:16:52', { new_version: '0.4.0-faulty' }),
+    base(D_NEW, '17:00:00', { class: 'healthy', failing_traces: 0, incident_ids: [], new_version: '0.1.0' }),
+  ];
+}
+const SPREAD_SET = [at(D_OLD, '00:00:00'), at(D_MID, '06:00:00'), at(D_NEW, '12:00:00')];
+
+type Label = { lane: number; text: string };
+
+// Reads a marker's below-axis label lines and its incident label, from the rendered markup.
+function labelsOf(marker: Marker): { below: Label[]; incident: Label | null } {
+  const texts = [...marker.markup.matchAll(/<text ([^>]*)>([^<]*)<\/text>/g)].map((m) => ({
+    attrs: m[1],
+    text: m[2],
+  }));
+  const pick = (kind: string) =>
+    texts
+      .filter((t) => t.attrs.includes(`data-label="${kind}"`))
+      .map((t) => ({ lane: Number(/data-lane="(\d+)"/.exec(t.attrs)?.[1]), text: t.text }));
+  return { below: pick('below'), incident: pick('incident')[0] ?? null };
+}
+
+function interval(x: number, labels: Label[]): [number, number] {
+  const width = Math.max(...labels.map((l) => l.text.length)) * LABEL_CHAR_WIDTH;
+  return [x - width / 2, x + width / 2];
+}
+
+// The fewest lanes that can hold intervals is the largest number of intervals covering one point.
+function maxOverlap(intervals: Array<[number, number]>): number {
+  const events = intervals.flatMap(([a, b]) => [[a, 1], [b, -1]] as const).sort((p, q) => p[0] - q[0] || p[1] - q[1]);
+  let current = 0;
+  let best = 0;
+  for (const [, delta] of events) {
+    current += delta;
+    best = Math.max(best, current);
+  }
+  return best;
+}
+
+const svgHeight = (markup: string) => Number(/<svg[^>]*height="(\d+(?:\.\d+)?)"/.exec(markup)![1]);
+
+function assertNoOverlapPerLane(entries: Array<{ lane: number; range: [number, number]; id: string }>) {
+  for (const a of entries) {
+    for (const b of entries) {
+      if (a.id < b.id && a.lane === b.lane) {
+        assert.ok(a.range[1] <= b.range[0] || b.range[1] <= a.range[0], `labels ${a.id} and ${b.id} overlap in lane ${a.lane}`);
+      }
+    }
+  }
+}
+
+test('no two rendered labels collide: texts on one baseline never overlap horizontally', () => {
+  const texts = [...loaded(clusteredSet()).matchAll(/<text [^>]*>([^<]*)<\/text>/g)].map((m) => {
+    const x = Number(/\bx="([\d.]+)"/.exec(m[0])![1]);
+    const y = Number(/\by="([\d.]+)"/.exec(m[0])![1]);
+    return { x, y, text: m[1], half: (m[1].length * LABEL_CHAR_WIDTH) / 2 };
+  });
+  for (let i = 0; i < texts.length; i += 1) {
+    for (let j = i + 1; j < texts.length; j += 1) {
+      const a = texts[i];
+      const b = texts[j];
+      if (a.y !== b.y) continue;
+      assert.ok(a.x + a.half <= b.x - b.half || b.x + b.half <= a.x - a.half, `"${a.text}" and "${b.text}" overlap at y=${a.y}`);
+    }
+  }
+});
+
+test('clustered markers keep their proportional x-positions', () => {
+  const found = markers(loaded(clusteredSet()));
+  const secondsOf = (id: string) => {
+    const d = clusteredSet().find((item) => item.deployment_id === id)!;
+    const [h, m, s] = d.timestamp.slice(11, 19).split(':').map(Number);
+    return h * 3600 + m * 60 + s;
+  };
+  const first = found[0];
+  const last = found[found.length - 1];
+  const span = secondsOf(last.id) - secondsOf(first.id);
+  for (const marker of found) {
+    const expected = (secondsOf(marker.id) - secondsOf(first.id)) / span;
+    const actual = (marker.x - first.x) / (last.x - first.x);
+    assert.ok(Math.abs(actual - expected) < 0.001, `${marker.id} drifted: ${actual} vs ${expected}`);
+  }
+});
+
+test('every marker stays on the single horizontal axis', () => {
+  const markup = loaded(clusteredSet());
+  const axisY = /<line[^>]*y1="([\d.]+)"[^>]*class="timeline-axis"/.exec(markup)![1];
+  for (const cy of markup.matchAll(/<circle[^>]*cy="([\d.]+)"/g)) assert.equal(cy[1], axisY);
+});
+
+test('label lanes are deterministic, whatever order the deployments arrive in', () => {
+  const lanes = (items: DeploymentItem[]) => markers(loaded(items)).map((m) => [m.id, labelsOf(m).below.map((l) => l.lane)]);
+  assert.deepEqual(lanes(clusteredSet()), lanes([...clusteredSet()].reverse()));
+});
+
+test('labels in the same lane never overlap, using the documented width estimate', () => {
+  const found = markers(loaded(clusteredSet()));
+  assertNoOverlapPerLane(
+    found.map((m) => ({ id: m.id, lane: labelsOf(m).below[0].lane, range: interval(m.x, labelsOf(m).below) })),
+  );
+});
+
+test('incident link labels in the same lane never overlap either', () => {
+  const found = markers(loaded(clusteredSet())).filter((m) => labelsOf(m).incident);
+  assert.ok(found.length >= 3, 'the cluster must include several incident-linked deployments');
+  assertNoOverlapPerLane(
+    found.map((m) => ({ id: m.id, lane: labelsOf(m).incident!.lane, range: interval(m.x, [labelsOf(m).incident!]) })),
+  );
+});
+
+test('the fewest possible lanes are used, for both below-axis and incident labels', () => {
+  const found = markers(loaded(clusteredSet()));
+  const below = found.map((m) => interval(m.x, labelsOf(m).below));
+  const usedBelow = new Set(found.map((m) => labelsOf(m).below[0].lane)).size;
+  assert.equal(usedBelow, maxOverlap(below));
+  assert.ok(usedBelow > 1, 'the cluster must actually need more than one lane');
+
+  const withIncident = found.filter((m) => labelsOf(m).incident);
+  const above = withIncident.map((m) => interval(m.x, [labelsOf(m).incident!]));
+  assert.equal(new Set(withIncident.map((m) => labelsOf(m).incident!.lane)).size, maxOverlap(above));
+});
+
+test('lane 0 is used first and lanes are contiguous', () => {
+  const lanes = [...new Set(markers(loaded(clusteredSet())).map((m) => labelsOf(m).below[0].lane))].sort((a, b) => a - b);
+  assert.deepEqual(lanes, lanes.map((_, i) => i));
+});
+
+test('a spread-out dataset stays in the base lane with no needless height', () => {
+  const markup = loaded(SPREAD_SET);
+  for (const marker of markers(markup)) assert.equal(labelsOf(marker).below[0].lane, 0);
+  assert.ok(!markup.includes('timeline-leader'), 'no leader lines when nothing is displaced');
+  assert.equal(svgHeight(markup), svgHeight(loaded([at(D_OLD, '00:00:00'), at(D_NEW, '20:00:00')])));
+  assert.ok(svgHeight(loaded(clusteredSet())) > svgHeight(markup), 'only clustered data grows the SVG');
+});
+
+test('displaced labels get a leader line to their marker, and base-lane labels do not', () => {
+  for (const marker of markers(loaded(clusteredSet()))) {
+    const lane = labelsOf(marker).below[0].lane;
+    const hasLeader = /<line[^>]*class="timeline-leader"/.test(marker.markup);
+    assert.equal(hasLeader, lane > 0, `${marker.id} lane ${lane}`);
+  }
+});
+
+test('the SVG is tall enough that no label clips at the top or bottom', () => {
+  const markup = loaded(clusteredSet());
+  const height = svgHeight(markup);
+  const ys = [...markup.matchAll(/<text [^>]*\by="([\d.]+)"/g)].map((m) => Number(m[1]));
+  assert.ok(Math.min(...ys) >= 10, `top label at y=${Math.min(...ys)} is clipped`);
+  assert.ok(Math.max(...ys) + 6 <= height, `bottom label at y=${Math.max(...ys)} exceeds height ${height}`);
+});
+
+test('clustered rendering keeps links, shapes, wording, and exact timestamps', () => {
+  const markup = loaded(clusteredSet());
+  assert.ok(markup.includes(`href="/incidents/${INCIDENT}"`) && markup.includes(`href="/incidents/${INCIDENT_2}"`));
+  assert.ok(markup.includes('Faulty: 3 HTTP 500 traces') && markup.includes('No failures observed'));
+  assert.ok(markup.includes('2026-10-06T14:15:53.000000000Z') && markup.includes('2026-10-06T14:16:52.000000000Z'));
+  const found = markers(markup);
+  assert.equal(found.filter((m) => m.markup.includes('class="marker-faulty"')).length, 3);
+  assert.equal(found.filter((m) => m.markup.includes('class="marker-healthy"')).length, 3);
+  assert.equal(markup.split('<tr id="row-').length - 1, 6, 'one table row per deployment');
 });
 
 test('the loaded header reports how many deployments are shown', () => {

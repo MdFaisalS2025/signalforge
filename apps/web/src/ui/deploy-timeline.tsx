@@ -14,11 +14,12 @@ export type DeployTimelineState =
 // docs/specs/2026-10-06-incident-dashboard.md, section 5.3.
 export const FOOTNOTE = '"No failures observed" is deliberately not "healthy". A deployment with no traffic is not proven healthy.';
 
+// Fixed typography estimate used to decide whether two labels collide: each character is assumed to be this many
+// pixels wide. The labels are 10 to 12px text, and 12px monospace is about 7.2px per character, so this estimate
+// plus the LABEL_PAD gap between neighbors is a conservative bound. No browser measurement is involved.
+export const LABEL_CHAR_WIDTH = 7;
 const PAD = 110;
 const GAP = 170;
-const INCIDENT_Y = 34;
-const AXIS_Y = 100;
-const HEIGHT = 200;
 
 function labelOf(deployment: DeploymentItem): string {
   return classifyDeployment({
@@ -81,21 +82,69 @@ function tieRun(times: bigint[], index: number): number {
   return run;
 }
 
-function Shape({ deployment, x }: { deployment: DeploymentItem; x: number }) {
+// Labels are placed in lanes so they never collide, while every marker keeps its exact time position. A label is
+// centered on its marker, so its extent is [x - width / 2, x + width / 2]. Labels are sorted by left edge and each
+// takes the first lane whose last label ends at least LABEL_PAD before it starts. For intervals this first-fit
+// order uses the fewest possible lanes, and it is deterministic because ties break by input order.
+const LABEL_PAD = 8;
+
+function assignLanes(items: Array<{ x: number; width: number }>): { lanes: number[]; count: number } {
+  const order = items
+    .map((item, index) => ({ index, left: item.x - item.width / 2, right: item.x + item.width / 2 }))
+    .sort((a, b) => a.left - b.left || a.index - b.index);
+  const laneEnds: number[] = [];
+  const lanes: number[] = new Array(items.length).fill(0);
+  for (const entry of order) {
+    let lane = laneEnds.findIndex((end) => end + LABEL_PAD <= entry.left);
+    if (lane === -1) {
+      lane = laneEnds.length;
+      laneEnds.push(entry.right);
+    } else {
+      laneEnds[lane] = entry.right;
+    }
+    lanes[entry.index] = lane;
+  }
+  return { lanes, count: laneEnds.length };
+}
+
+const BELOW_LANE_HEIGHT = 52; // version, status, and timestamp lines
+const ABOVE_LANE_HEIGHT = 34; // incident diamond and its link text
+
+function statusText(deployment: DeploymentItem): string {
+  return deployment.class === 'unknown' ? deployment.status : labelOf(deployment);
+}
+
+function incidentText(incidentId: string): string {
+  return `incident ${incidentId.slice(0, 8)}…`;
+}
+
+function Shape({ deployment, x, axisY }: { deployment: DeploymentItem; x: number; axisY: number }) {
   if (deployment.class === 'faulty') {
-    const points = `${x},${AXIS_Y - 9} ${x + 9},${AXIS_Y + 7} ${x - 9},${AXIS_Y + 7}`;
+    const points = `${x},${axisY - 9} ${x + 9},${axisY + 7} ${x - 9},${axisY + 7}`;
     return <polygon points={points} className="marker-faulty" />;
   }
   if (deployment.class === 'healthy') {
-    return <circle cx={x} cy={AXIS_Y} r={7} className="marker-healthy" />;
+    return <circle cx={x} cy={axisY} r={7} className="marker-healthy" />;
   }
-  return <circle cx={x} cy={AXIS_Y} r={6} className="marker-unknown" />;
+  return <circle cx={x} cy={axisY} r={6} className="marker-unknown" />;
 }
 
-function Marker({ deployment, x, index }: { deployment: DeploymentItem; x: number; index: number }) {
+function Marker({
+  deployment,
+  x,
+  axisY,
+  lane,
+  incidentLane,
+}: {
+  deployment: DeploymentItem;
+  x: number;
+  axisY: number;
+  lane: number;
+  incidentLane: number;
+}) {
   const incident = deployment.incident_ids[0];
-  // Timestamps alternate between two rows so neighbors never overlap.
-  const timeY = AXIS_Y + 58 + (index % 2) * 16;
+  const base = axisY + lane * BELOW_LANE_HEIGHT;
+  const incidentY = axisY - 66 - incidentLane * ABOVE_LANE_HEIGHT;
   return (
     <g
       id={`deployment-${deployment.deployment_id}`}
@@ -105,33 +154,43 @@ function Marker({ deployment, x, index }: { deployment: DeploymentItem; x: numbe
       data-x={x}
     >
       <title>{deployment.deployment_id}</title>
+      {lane > 0 ? <line x1={x} x2={x} y1={axisY + 10} y2={base + 14} className="timeline-leader" /> : null}
       {incident ? (
         <>
-          <line x1={x} x2={x} y1={INCIDENT_Y + 8} y2={AXIS_Y - 9} className="timeline-connector" />
+          <line x1={x} x2={x} y1={incidentY + 8} y2={axisY - 9} className="timeline-connector" />
           <a href={`/incidents/${incident}`}>
             <polygon
-              points={`${x},${INCIDENT_Y - 8} ${x + 8},${INCIDENT_Y} ${x},${INCIDENT_Y + 8} ${x - 8},${INCIDENT_Y}`}
+              points={`${x},${incidentY - 8} ${x + 8},${incidentY} ${x},${incidentY + 8} ${x - 8},${incidentY}`}
               className="marker-incident"
             />
-            <text x={x} y={INCIDENT_Y - 14} textAnchor="middle" className="timeline-link mono">
-              {`incident ${incident.slice(0, 8)}…`}
+            <text
+              x={x}
+              y={incidentY - 14}
+              textAnchor="middle"
+              className="timeline-link mono"
+              data-label="incident"
+              data-lane={incidentLane}
+            >
+              {incidentText(incident)}
             </text>
           </a>
         </>
       ) : null}
-      <Shape deployment={deployment} x={x} />
-      <text x={x} y={AXIS_Y + 26} textAnchor="middle" className="timeline-label mono">
+      <Shape deployment={deployment} x={x} axisY={axisY} />
+      <text x={x} y={base + 26} textAnchor="middle" className="timeline-label mono" data-label="below" data-lane={lane}>
         {deployment.new_version}
       </text>
       <text
         x={x}
-        y={AXIS_Y + 42}
+        y={base + 42}
         textAnchor="middle"
         className={deployment.class === 'faulty' ? 'timeline-status timeline-status-faulty' : 'timeline-status'}
+        data-label="below"
+        data-lane={lane}
       >
-        {deployment.class === 'unknown' ? deployment.status : labelOf(deployment)}
+        {statusText(deployment)}
       </text>
-      <text x={x} y={timeY} textAnchor="middle" className="timeline-time mono">
+      <text x={x} y={base + 58} textAnchor="middle" className="timeline-time mono" data-label="below" data-lane={lane}>
         {deployment.timestamp}
       </text>
     </g>
@@ -142,15 +201,46 @@ function Timeline({ deployments }: { deployments: DeploymentItem[] }) {
   const sorted = oldestFirst(deployments);
   const width = Math.max(800, PAD * 2 + (sorted.length - 1) * GAP);
   const positions = place(sorted, width);
-  const x = (index: number) => positions[index];
+
+  // Below the axis: every marker has a three-line label block, as wide as its longest line.
+  const below = assignLanes(
+    sorted.map((deployment, index) => ({
+      x: positions[index],
+      width:
+        Math.max(deployment.new_version.length, statusText(deployment).length, deployment.timestamp.length) *
+        LABEL_CHAR_WIDTH,
+    })),
+  );
+
+  // Above the axis: only incident-linked markers have a link label. Others take no lane and no space.
+  const linked = sorted.map((deployment, index) => ({ deployment, index })).filter((entry) => entry.deployment.incident_ids.length > 0);
+  const above = assignLanes(
+    linked.map(({ deployment, index }) => ({
+      x: positions[index],
+      width: incidentText(deployment.incident_ids[0]).length * LABEL_CHAR_WIDTH,
+    })),
+  );
+  const incidentLaneOf = new Map(linked.map((entry, i) => [entry.index, above.lanes[i]]));
+
+  // Lane 0 sits where the single-lane layout always did. Extra lanes add height only when they are used.
+  const axisY = 100 + Math.max(0, above.count - 1) * ABOVE_LANE_HEIGHT;
+  const height = axisY + 100 + Math.max(0, below.count - 1) * BELOW_LANE_HEIGHT;
+
   return (
     <div className="timeline">
       <div className="timeline-scroll">
-        <svg width={width} height={HEIGHT} viewBox={`0 0 ${width} ${HEIGHT}`} role="img" aria-labelledby="deploy-timeline-title">
+        <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} role="img" aria-labelledby="deploy-timeline-title">
           <title id="deploy-timeline-title">Payments deployments in UTC order, oldest on the left</title>
-          <line x1={PAD - 50} x2={width - PAD + 50} y1={AXIS_Y} y2={AXIS_Y} className="timeline-axis" />
+          <line x1={PAD - 50} x2={width - PAD + 50} y1={axisY} y2={axisY} className="timeline-axis" />
           {sorted.map((deployment, index) => (
-            <Marker key={deployment.deployment_id} deployment={deployment} x={x(index)} index={index} />
+            <Marker
+              key={deployment.deployment_id}
+              deployment={deployment}
+              x={positions[index]}
+              axisY={axisY}
+              lane={below.lanes[index]}
+              incidentLane={incidentLaneOf.get(index) ?? 0}
+            />
           ))}
         </svg>
       </div>
