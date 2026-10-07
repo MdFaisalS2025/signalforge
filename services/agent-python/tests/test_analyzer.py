@@ -1,6 +1,7 @@
 import copy
 import json
 import random
+import re
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -614,6 +615,63 @@ class VerifyClaimTest(unittest.TestCase):
         verify_claim("failure_burst", [E_T1, E_T2, E_T3], self.full)
         verify_claim("failure_burst", [E_T1], self.full)
         self.assertEqual(self.full.canonical_json(), before)
+
+
+UUID_TEXT = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+HEX32_TEXT = re.compile(r"\b[0-9a-f]{32}\b")
+VERSION_TEXT = re.compile(r"\d+\.\d+\.\d+(?:-[A-Za-z0-9]+)?")
+NUMBER_TEXT = re.compile(r"\d+(?:\.\d+)?")
+
+
+def tokens_in(text):
+    """UUIDs, 32-hex IDs, version strings, and numbers in a sentence, as the spec's G4 rule enumerates them."""
+    found = set(UUID_TEXT.findall(text))
+    text = UUID_TEXT.sub(" ", text)
+    found |= set(HEX32_TEXT.findall(text))
+    text = HEX32_TEXT.sub(" ", text)
+    found |= set(VERSION_TEXT.findall(text))
+    text = VERSION_TEXT.sub(" ", text)
+    return found | set(NUMBER_TEXT.findall(text))
+
+
+def grounded_text(document):
+    """The fields the grounding rule G4 checks: hypothesis, claims, alternatives, and the reasoning summary."""
+    parts = [document.get("primary_hypothesis", ""), document["reasoning_summary"]]
+    parts += [claim["claim"] for claim in document["supporting_claims"]]
+    parts += [alternative["hypothesis"] for alternative in document["alternative_hypotheses"]]
+    return " ".join(parts)
+
+
+class TokenGroundingTest(unittest.TestCase):
+    """Every identifier and number the analyzer writes is one the bundle holds, so a correct G4 accepts it."""
+
+    def assert_grounded(self, bundle, label):
+        document = analyze(bundle, version=1, now=NOW)
+        ungrounded = tokens_in(grounded_text(document)) - bundle.allowed_tokens()
+        self.assertEqual(ungrounded, set(), f"{label}: tokens the bundle does not hold")
+
+    def test_the_analyzer_text_for_every_fixture_is_fully_token_grounded(self):
+        for name in FIXTURE_NAMES:
+            with self.subTest(fixture=name):
+                self.assert_grounded(bundle_of(name), name)
+
+    def test_the_http_500_wording_is_grounded_by_the_fixed_status_token(self):
+        bundle = bundle_of("faulty_deploy_full")
+        document = analyze(bundle, version=1, now=NOW)
+        self.assertIn("HTTP 500", document["primary_hypothesis"])
+        self.assertIn("500", tokens_in(grounded_text(document)))
+        self.assertIn("500", bundle.allowed_tokens())
+
+    def test_variant_outputs_are_token_grounded_too(self):
+        def spread(raw):
+            set_failure_times(raw, "2026-10-07 21:49:30.988000000", "2026-10-07 21:50:11.046000000", "2026-10-07 21:50:11.090000000")
+
+        def contradict(raw):
+            spans_with(raw, 1, **{"http.response.status_code": 200})
+
+        for label, mutate in (("spread burst", spread), ("contradicting telemetry", contradict)):
+            with self.subTest(case=label):
+                self.assert_grounded(bundle_of("faulty_deploy_full", mutate), label)
 
 
 if __name__ == "__main__":

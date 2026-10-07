@@ -474,7 +474,7 @@ class IdentifierSetsTest(unittest.TestCase):
 
     def test_allowed_tokens_include_the_version_the_rule_constants_and_the_evidence_count(self):
         tokens = build_bundle(load_raw()).allowed_tokens()
-        for token in ("0.2.0-faulty", "30", "300", "4"):
+        for token in ("0.2.0-faulty", "30", "300", "500", "4"):
             self.assertIn(token, tokens)
 
     def test_allowed_tokens_exclude_other_incidents_and_uncited_or_dropped_identifiers(self):
@@ -681,7 +681,7 @@ class DerivedTokensTest(unittest.TestCase):
         self.assertEqual(timestamps_in(tokens), set())
         self.assertEqual(decimals_in(tokens), set())
         self.assertIn("0", tokens)
-        self.assertEqual(tokens, frozenset({INCIDENT_ID, DEPLOYMENT_ID, "0", "30", "300"}))
+        self.assertEqual(tokens, frozenset({INCIDENT_ID, DEPLOYMENT_ID, "0", "30", "300", "500"}))
 
     def test_three_failures_at_one_instant_have_a_burst_of_zero(self):
         raw = load_raw()
@@ -753,6 +753,74 @@ class DerivedTokensTest(unittest.TestCase):
         tokens = bundle.allowed_tokens()
         self.assertIn(bundle_module.format_seconds(bundle.burst_duration_ns()), tokens)
         self.assertIn(bundle_module.format_seconds(bundle.first_failure_delay_ns()), tokens)
+
+
+class FixedDetectionFactsTest(unittest.TestCase):
+    """30, 300, and the HTTP failure status 500 are fixed facts of the known detection rule.
+
+    They are constants of payments-5xx-burst-after-deployment, never read from telemetry. 500 is not a general
+    permission for status codes: any other status that appears in raw spans stays out of the token set.
+    """
+
+    def test_the_http_failure_status_is_a_fixed_token_of_the_faulty_deployment_bundle(self):
+        self.assertIn("500", build_bundle(load_raw()).allowed_tokens())
+
+    def test_the_documented_fixed_facts_are_exactly_30_300_and_500(self):
+        self.assertEqual(bundle_module.RULE_CONSTANT_TOKENS, ("30", "300", "500"))
+
+    def test_500_is_present_with_no_telemetry_at_all_so_it_is_not_copied_from_spans(self):
+        self.assertIn("500", build_bundle(load_raw("faulty_deploy_no_telemetry")).allowed_tokens())
+        raw = load_raw("faulty_deploy_no_telemetry")
+        raw.evidence = []
+        raw.deployment = None
+        self.assertIn("500", build_bundle(raw).allowed_tokens())
+
+    def test_500_is_present_even_when_no_span_reports_it(self):
+        raw = load_raw()
+        for row in raw.spans:
+            data = json.loads(row["attributes"])
+            data["http.response.status_code"] = 404
+            row["attributes"] = json.dumps(data)
+        self.assertIn("500", build_bundle(raw).allowed_tokens())
+
+    def test_other_status_codes_in_raw_spans_never_become_tokens(self):
+        raw = load_raw()
+        for status, row in zip(("418", 599, "503", 404, "200", 301), raw.spans * 2):
+            data = json.loads(row["attributes"])
+            data["http.response.status_code"] = status
+            row["attributes"] = json.dumps(data)
+        extra = span_for(TRACE_IDS[0], "7" * 16, clickhouse_ts(12, 0))
+        extra["attributes"] = json.dumps({"span.kind": "server", "span.name": "POST /payments/charge", "http.response.status_code": 418})
+        raw.spans.append(extra)
+        tokens = build_bundle(raw).allowed_tokens()
+        for status in ("418", "599", "503", "404", "200", "301"):
+            with self.subTest(status=status):
+                self.assertNotIn(status, tokens)
+
+    def test_telemetry_cannot_change_the_token_set_at_all(self):
+        raw = load_raw()
+        for n, row in enumerate(raw.spans):
+            data = json.loads(row["attributes"])
+            data["http.response.status_code"] = 400 + n
+            row["attributes"] = json.dumps(data)
+        self.assertEqual(
+            build_bundle(raw).allowed_tokens(), build_bundle(load_raw("faulty_deploy_no_telemetry")).allowed_tokens()
+        )
+
+    def test_raw_status_text_in_evidence_summaries_and_logs_is_not_a_token(self):
+        raw = load_raw()
+        raw.evidence[1]["summary"] = "demo-payments returned HTTP 418 for trace x"
+        raw.logs.append(log_for(TRACE_IDS[0], clickhouse_ts(13, 0), "status 599"))
+        tokens = build_bundle(raw).allowed_tokens()
+        self.assertNotIn("418", tokens)
+        self.assertNotIn("599", tokens)
+
+    def test_adding_the_fixed_token_does_not_change_the_canonical_json(self):
+        bundle = build_bundle(load_raw())
+        before = bundle.canonical_json()
+        self.assertIn("500", bundle.allowed_tokens())
+        self.assertEqual(bundle.canonical_json(), before)
+        self.assertNotIn('"500"', before, "the fixed token is a set member, not bundle content")
 
 
 class FormatSecondsTest(unittest.TestCase):

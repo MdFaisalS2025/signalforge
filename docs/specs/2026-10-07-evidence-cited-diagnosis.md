@@ -278,7 +278,7 @@ first (`G0`) and the remaining rules only for a schema-valid document. The rules
 | `G1_unknown_evidence` | Every ID in `evidence_ids` and `disconfirming_evidence_ids` is in the bundle's evidence set for this `incident_id`. A UUID that exists for another incident is also unknown. |
 | `G2_kind_citation_shape` | Each claim cites the evidence-row types its `kind` requires (section 7.2). |
 | `G3_claim_not_verified` | The claim's verifier fails against the bundle facts. |
-| `G4_untraceable_token` | Every UUID, 32-hex trace ID, version string, and number in `primary_hypothesis`, any `claim`, any `hypothesis`, or `reasoning_summary` appears in the bundle's allowed-token set (section 8.2). Numbers derived by the analyzer (a time delta) are in the set when the bundle computes them. |
+| `G4_untraceable_token` | Every UUID, 32-hex trace ID, version string, and number in `primary_hypothesis`, any `claim`, any `hypothesis`, or `reasoning_summary` appears in the bundle's allowed-token set (section 8.2). Numbers derived by the analyzer (a time delta) are in the set when the bundle computes them. The fixed detection facts `30`, `300`, and the HTTP failure status `500` are in the set; no other status code is, so a sentence that names `418` or `503` is rejected. |
 | `G5_confidence_exceeds_ceiling` | `confidence.value` is above `max_confidence(bundle)` (section 7.6). |
 | `G6_abstention_inconsistent` | `abstain`, `status`, `primary_hypothesis`, claims, `missing_evidence`, confidence, and action type violate the conditional rules in 7.1 and 7.4. |
 | `G7_recommendation_unsafe` | `executable` is not `false`, `requires_approval` is not `true`, `parameters` values differ from the incident's values, or a text field matches the command pattern below. |
@@ -403,7 +403,12 @@ input and is never forwarded as text (section 15.4).
 
 **Allowed-token set.** The union of: the incident, evidence, deployment, and trace IDs; the deployment version;
 the four evidence timestamps rendered as the analyzer renders them; the numbers the bundle computes (burst
-seconds, delta seconds, evidence count); and the rule constants `30` and `300`. `G4` checks sentences against it.
+seconds, delta seconds, evidence count); and the fixed detection facts `30`, `300`, and the HTTP failure status
+`500`. The three constants belong to the one known rule, `payments-5xx-burst-after-deployment` (a burst within 30
+seconds, beginning at most 300 seconds after the deploy, of HTTP 500 failures). They are fixed by the rule and are never
+read from telemetry, so `500` is not a general permission for status values: any other status that appears in raw spans
+is not a token. `G4` checks sentences against the set, and the analyzer's own "HTTP 500" wording passes it without a
+validator exception.
 
 **Size bound.** The canonical JSON of the bundle is at most 16,384 bytes. If it is larger, building raises
 `BundleTooLarge` and the incident is recorded as `failed` with code `bundle_too_large`. With the bounds above, a

@@ -269,8 +269,9 @@ AI provider.
     `[unrecognized log message omitted]` and the original text appears nowhere in the canonical JSON;
   - `initiated_by` and `previous_version` never appear;
   - more than 16,384 canonical bytes raises `BundleTooLarge`;
-  - `allowed_tokens()` contains every incident, evidence, deployment, and trace ID, the version, `30`, and `300`, and
-    does not contain an ID from a different incident's fixture.
+  - `allowed_tokens()` contains every incident, evidence, deployment, and trace ID, the version, and the fixed
+    detection facts `30`, `300`, and `500` (the HTTP failure status of the known rule, never read from telemetry), and
+    does not contain an ID from a different incident's fixture or a status code that merely appears in raw spans.
 - [ ] **Step 3: Run.** `node scripts/py-in-docker.mjs python -m unittest tests.test_ids tests.test_bundle -v`.
   Expected RED: `ModuleNotFoundError: No module named 'signalforge_agent.ids'`.
 - [ ] **Step 4: Implement `ids.py` and `bundle.py`** (UUIDv5 from the standard library; canonical JSON with
@@ -349,7 +350,9 @@ AI provider.
       doc["supporting_claims"][0]["evidence_ids"] = [OTHER_INCIDENT_EVIDENCE_ID]
       ...codes == ("G1_unknown_evidence",)
   ```
-  Also: an invented trace ID in a claim (`G4`); an invented number (`G4`); the integer `300` is allowed;
+  Also: an invented trace ID in a claim (`G4`); an invented number (`G4`); the integers `300` and `500` are allowed
+  because `bundle.allowed_tokens()` holds them as fixed detection facts, so the validator needs no special case for the
+  analyzer's "HTTP 500" wording, while any other status code such as `418` is rejected (`G4`);
   `high` with no telemetry (`G5`); abstention inconsistencies (`G6`); `docker restart` in the summary, a changed
   service parameter, and `executable: true` after bypassing the schema in a unit-level call (`G7`); `<script>` and
   `SELECT` in text (`G8`); a schema failure returns only `("G0_schema",)`. A last test asserts that two defects in

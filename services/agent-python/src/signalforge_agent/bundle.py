@@ -35,8 +35,10 @@ KNOWN_LOG_BODIES = frozenset(
 )
 KNOWN_SPAN_KINDS = frozenset({"server", "client", "unspecified"})
 
-# The constants of the detection rule: a burst is within 30 seconds and starts at most 300 seconds after the deploy.
-RULE_CONSTANT_TOKENS = ("30", "300")
+# The fixed facts of the detection rule payments-5xx-burst-after-deployment: a burst is within 30 seconds, it starts at
+# most 300 seconds after the deploy, and a failure is HTTP status 500. They are constants, never read from telemetry, and
+# "500" is not a permission for other status codes: any other status in raw spans is not a token.
+RULE_CONSTANT_TOKENS = ("30", "300", "500")
 
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _CLICKHOUSE_TIMESTAMP = re.compile(r"(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})\.(\d{9})")
@@ -186,7 +188,7 @@ class EvidenceBundle:
         - every retained evidence timestamp, rendered exactly as in the canonical bundle (nine fractional digits, Z);
         - the evidence count, the burst duration, and the deployment-to-first-failure delay, each rendered by
           format_seconds and present only when the bundle can define it;
-        - the detection-rule constants 30 and 300.
+        - the fixed detection facts 30, 300, and the HTTP failure status 500.
         """
         tokens = {self.incident.incident_id, str(len(self.evidence)), *RULE_CONSTANT_TOKENS}
         if self.incident.deployment_id:
