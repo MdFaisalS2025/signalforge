@@ -1,0 +1,38 @@
+{
+  "schema_version": "1.1",
+  "diagnosis_id": "c03997a4-e1ef-5a94-8a2e-62d9694d7642",
+  "incident_id": "5893b198-6ad5-5708-bb7e-a0d2ca4ca323",
+  "diagnosis_version": 1,
+  "status": "abstained",
+  "abstain": true,
+  "primary_hypothesis": "Payments deployment 0.2.0-faulty (57d9bf44-46c0-46e9-8140-4a7b9f3694a8) introduced an HTTP 500 regression: three distinct Payments requests failed within 0.1 seconds, starting 4.6 seconds after the deployment.",
+  "supporting_claims": [],
+  "alternative_hypotheses": [],
+  "confidence": {
+    "value": "low",
+    "explanation": "The evidence set is not the expected shape, so no cause is asserted."
+  },
+  "missing_evidence": [
+    "Exactly one deployment row and three trace rows"
+  ],
+  "reasoning_summary": "The stored evidence is not one deployment row and three trace rows, so no diagnosis is made.",
+  "remediation_recommendation": {
+    "action_type": "investigate",
+    "summary": "Investigate why the incident's evidence set is incomplete.",
+    "parameters": {},
+    "risk": "low",
+    "expected_effect": "A complete evidence set allows a diagnosis.",
+    "rollback_note": "Nothing was changed, so there is nothing to roll back.",
+    "executable": false,
+    "requires_approval": true
+  },
+  "provider": {
+    "name": "deterministic",
+    "model": "deterministic-rules-1",
+    "fallback_from": null
+  },
+  "model_version": "deterministic-rules-1",
+  "prompt_version": "none",
+  "input_digest": "sha256:495b651357ec3680b88c57810ceee9bf05a1ddd0553b1e62e7e7a1f5977d22ea",
+  "created_at": "2026-10-07T21:49:41.208Z"
+}

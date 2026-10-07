@@ -1,0 +1,101 @@
+{
+  "schema_version": "1.1",
+  "diagnosis_id": "c03997a4-e1ef-5a94-8a2e-62d9694d7642",
+  "incident_id": "5893b198-6ad5-5708-bb7e-a0d2ca4ca323",
+  "diagnosis_version": 1,
+  "status": "completed",
+  "abstain": false,
+  "primary_hypothesis": "Payments deployment 0.2.0-faulty (57d9bf44-46c0-46e9-8140-4a7b9f3694a8) introduced an HTTP 500 regression: three distinct Payments requests failed within 0.1 seconds, starting 4.6 seconds after the deployment.",
+  "supporting_claims": [
+    {
+      "kind": "deployment_succeeded",
+      "claim": "Deployment 0.2.0-faulty (57d9bf44-46c0-46e9-8140-4a7b9f3694a8) succeeded in demo-payments.",
+      "evidence_ids": [
+        "2b36dac1-5929-5a4f-9c94-5e46d810d714"
+      ]
+    },
+    {
+      "kind": "deployment_before_failure",
+      "claim": "The first failing request came 4.6 seconds after deployment 0.2.0-faulty succeeded.",
+      "evidence_ids": [
+        "2b36dac1-5929-5a4f-9c94-5e46d810d714",
+        "7aa3c142-a1f0-5582-a339-6021113cae07"
+      ]
+    },
+    {
+      "kind": "failure_burst",
+      "claim": "Three distinct Payments requests failed within 0.1 seconds.",
+      "evidence_ids": [
+        "7aa3c142-a1f0-5582-a339-6021113cae07",
+        "14febb59-2cc7-5b39-a4a8-50f7a886496c",
+        "702b37a8-7924-57f0-aa44-60033174de1c"
+      ]
+    },
+    {
+      "kind": "http_500_in_payments",
+      "claim": "Each of the three failing requests returned HTTP 500 from demo-payments.",
+      "evidence_ids": [
+        "7aa3c142-a1f0-5582-a339-6021113cae07",
+        "14febb59-2cc7-5b39-a4a8-50f7a886496c",
+        "702b37a8-7924-57f0-aa44-60033174de1c"
+      ]
+    },
+    {
+      "kind": "failures_share_deployment",
+      "claim": "All three failing requests carry deployment ID 57d9bf44-46c0-46e9-8140-4a7b9f3694a8.",
+      "evidence_ids": [
+        "7aa3c142-a1f0-5582-a339-6021113cae07",
+        "14febb59-2cc7-5b39-a4a8-50f7a886496c",
+        "702b37a8-7924-57f0-aa44-60033174de1c"
+      ]
+    }
+  ],
+  "alternative_hypotheses": [
+    {
+      "hypothesis": "A fault in demo-orders, the caller, caused the failures.",
+      "disconfirming_evidence_ids": [
+        "7aa3c142-a1f0-5582-a339-6021113cae07",
+        "14febb59-2cc7-5b39-a4a8-50f7a886496c",
+        "702b37a8-7924-57f0-aa44-60033174de1c"
+      ]
+    },
+    {
+      "hypothesis": "Unrelated or random Payments errors caused the failures.",
+      "disconfirming_evidence_ids": [
+        "2b36dac1-5929-5a4f-9c94-5e46d810d714",
+        "7aa3c142-a1f0-5582-a339-6021113cae07",
+        "14febb59-2cc7-5b39-a4a8-50f7a886496c",
+        "702b37a8-7924-57f0-aa44-60033174de1c"
+      ]
+    }
+  ],
+  "confidence": {
+    "value": "high",
+    "explanation": "Telemetry for all three traces confirms HTTP 500 server spans that carry the incident's deployment ID."
+  },
+  "missing_evidence": [],
+  "reasoning_summary": "Verified claims: deployment_succeeded, deployment_before_failure, failure_burst, http_500_in_payments, failures_share_deployment. The deployment succeeded, then three distinct Payments requests failed within 0.1 seconds, the first 4.6 seconds later. Confidence is high because telemetry for all three traces corroborates the stored evidence rows.",
+  "remediation_recommendation": {
+    "action_type": "rollback_deployment",
+    "summary": "Consider rolling back demo-payments from 0.2.0-faulty to its previous known-good version.",
+    "parameters": {
+      "service": "demo-payments",
+      "deployment_id": "57d9bf44-46c0-46e9-8140-4a7b9f3694a8",
+      "from_version": "0.2.0-faulty"
+    },
+    "risk": "low",
+    "expected_effect": "Payments requests stop returning HTTP 500 if the regression is confined to this release.",
+    "rollback_note": "The previous version is not recorded in this slice, so a human must choose it.",
+    "executable": true,
+    "requires_approval": true
+  },
+  "provider": {
+    "name": "deterministic",
+    "model": "deterministic-rules-1",
+    "fallback_from": null
+  },
+  "model_version": "deterministic-rules-1",
+  "prompt_version": "none",
+  "input_digest": "sha256:495b651357ec3680b88c57810ceee9bf05a1ddd0553b1e62e7e7a1f5977d22ea",
+  "created_at": "2026-10-07T21:49:41.208Z"
+}
