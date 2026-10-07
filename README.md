@@ -4,12 +4,13 @@ AI incident response and observability platform: turns raw operational telemetry
 into evidence-linked incident diagnoses and safe, human-approved remediation
 workflows.
 
-**Status: Orders → Payments observability slice and the faulty-deployment incident-correlation
-slice implemented.** Two demo services (`demo-orders`, `demo-payments`) run in Docker Compose and
+**Status: Orders → Payments observability slice, the faulty-deployment incident-correlation
+slice, and the incident dashboard implemented.** Two demo services (`demo-orders`, `demo-payments`) run in Docker Compose and
 export traces, metrics, and logs over OTLP/HTTP to the OpenTelemetry Collector. A faulty payments
 deployment now produces one persisted, evidence-linked incident (see
-[Faulty deployment incident correlation](#faulty-deployment-incident-correlation)). The agent, the
-dashboard, and remediation are still placeholder scaffolding. The overall plan is in
+[Faulty deployment incident correlation](#faulty-deployment-incident-correlation)), and a read-only
+dashboard at `http://localhost:3000` (bound to localhost only) shows it. The agent, the API, and
+remediation are still placeholder scaffolding. The overall plan is in
 [`SignalForge_Project_Plan.docx`](SignalForge_Project_Plan.docx).
 
 ## Problem and user workflow
@@ -114,8 +115,8 @@ docker compose -f infra/docker/docker-compose.yml down
 
 Running `docker compose ... up -d` without service names starts every service in the
 file. Redpanda, ClickHouse, Temporal, Prometheus, and Grafana are real images that
-the slice does not use. `collector-go`, `agent-python`, `remediation`, `api`, `web`,
-and `demo-inventory` are placeholder containers (`sleep infinity`).
+the slice does not use. `agent-python`, `remediation`, `api`, and `demo-inventory` are
+placeholder containers (`sleep infinity`).
 
 ## Endpoints
 
@@ -299,7 +300,7 @@ fail on purpose, so leave both at `0` for normal use.
 
 ## Faulty deployment dashboard
 
-A read-only dashboard at `http://localhost:3000` shows the incidents the correlator created, the
+A read-only dashboard at `http://localhost:3000` (published on `127.0.0.1` only, because it has no authentication) shows the incidents the correlator created, the
 deployment each one is linked to, its four evidence items, and a timeline of recent Payments
 deployments. The design is in
 [docs/specs/2026-10-06-incident-dashboard.md](docs/specs/2026-10-06-incident-dashboard.md).

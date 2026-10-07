@@ -153,7 +153,7 @@ function Marker({
       data-class={deployment.class}
       data-x={x}
     >
-      <title>{deployment.deployment_id}</title>
+      <title>{`Deployed ${deployment.timestamp} (${deployment.deployment_id})`}</title>
       {lane > 0 ? <line x1={x} x2={x} y1={axisY + 10} y2={base + 14} className="timeline-leader" /> : null}
       {incident ? (
         <>

@@ -36,9 +36,9 @@ function UtcTime({ iso }: { iso: string }) {
   );
 }
 
-function StatusDot({ word, attribute, value }: { word: string; attribute: string; value: string }) {
+function StatusDot({ word, attribute, value, title }: { word: string; attribute: string; value: string; title?: string }) {
   return (
-    <span className="status" {...{ [attribute]: value }}>
+    <span className="status" title={title} {...{ [attribute]: value }}>
       <span className="dot" aria-hidden="true"></span>
       {word}
     </span>
@@ -73,6 +73,7 @@ function LoadedRows({ incidents }: { incidents: IncidentItem[] }) {
               word={incident.publication_state}
               attribute="data-publication"
               value={incident.publication_state}
+              title={incident.published_at === null ? undefined : `Published at ${incident.published_at}`}
             />
           </td>
         </tr>

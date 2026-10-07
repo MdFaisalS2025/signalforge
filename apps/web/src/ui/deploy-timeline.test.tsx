@@ -394,3 +394,14 @@ test('clustered rendering keeps links, shapes, wording, and exact timestamps', (
 test('the loaded header reports how many deployments are shown', () => {
   assert.match(loaded([faulty, healthy]), />2 loaded</);
 });
+
+test('every deployment marker has an SVG <title> with its exact deployment timestamp', () => {
+  const ms = markers(loaded([healthy, faulty]));
+  assert.equal(ms.length, 2);
+  for (const marker of ms) {
+    const title = /<title>([^<]*)<\/title>/.exec(marker.markup)?.[1] ?? '';
+    const source = marker.id === faulty.deployment_id ? faulty : healthy;
+    assert.ok(title.includes(source.timestamp), `marker ${marker.id} title "${title}" must include ${source.timestamp}`);
+    assert.ok(title.includes(marker.id), 'the deployment ID stays in the tooltip');
+  }
+});

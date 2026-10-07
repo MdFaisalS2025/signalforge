@@ -261,3 +261,53 @@ test('no error body contains SELECT, Code:, or a stack frame', async () => {
     assert.equal(body.headers.get('cache-control'), 'no-store');
   }
 });
+
+// ---- Exact content type ----
+// The contract (spec 5.4) requires exactly "application/json; charset=utf-8", not just any JSON type.
+
+const JSON_CONTENT_TYPE = 'application/json; charset=utf-8';
+
+test('every JSON success response carries exactly "application/json; charset=utf-8" and no-store', async () => {
+  useRepo({
+    listIncidents: async () => [],
+    getIncident: async () => incidentRow,
+    getDeployment: async () => null,
+    listEvidence: async () => [],
+    listDeployments: async () => [],
+  });
+  const responses = [
+    await incidentsRoute.GET(new Request(listUrl())),
+    await incidentDetailRoute.GET(new Request(detailUrl(INCIDENT_ID)), detailContext(INCIDENT_ID)),
+    await deploymentsRoute.GET(new Request(deploymentsUrl())),
+  ];
+  for (const response of responses) {
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('content-type'), JSON_CONTENT_TYPE);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+  }
+});
+
+test('every JSON error response (400, 404, 500, 503, 405) carries exactly "application/json; charset=utf-8"', async () => {
+  const unavailable = async () => {
+    throw new ClickHouseUnavailable();
+  };
+  const responses: Response[] = [];
+  responses.push(await incidentsRoute.GET(new Request(listUrl('?limit=0'))));
+  useRepo({ getIncident: async () => null });
+  responses.push(await incidentDetailRoute.GET(new Request(detailUrl(INCIDENT_ID)), detailContext(INCIDENT_ID)));
+  useRepo({ listIncidents: unavailable });
+  responses.push(await incidentsRoute.GET(new Request(listUrl())));
+  useRepo({
+    listIncidents: async () => {
+      throw new Error('Code: 62. DB::Exception: SELECT leak');
+    },
+  });
+  responses.push(await incidentsRoute.GET(new Request(listUrl())));
+  responses.push(await incidentsRoute.POST());
+  assert.deepEqual(responses.map((r) => r.status), [400, 404, 503, 500, 405]);
+  for (const response of responses) {
+    assert.equal(response.headers.get('content-type'), JSON_CONTENT_TYPE);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    assert.doesNotMatch(await response.text(), /SELECT|Code:/);
+  }
+});

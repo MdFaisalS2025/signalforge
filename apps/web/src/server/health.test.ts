@@ -10,3 +10,8 @@ test('GET /api/health returns 200 with the exact ok body and no-store caching', 
   assert.equal(response.headers.get('cache-control'), 'no-store');
   assert.deepEqual(await response.json(), { status: 'ok' });
 });
+
+test('GET /api/health carries exactly "application/json; charset=utf-8"', async () => {
+  const response = await GET();
+  assert.equal(response.headers.get('content-type'), 'application/json; charset=utf-8');
+});

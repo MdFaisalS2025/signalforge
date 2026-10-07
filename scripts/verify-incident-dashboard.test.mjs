@@ -401,3 +401,27 @@ describe('dashboard_reader account (needs ClickHouse)', () => {
     assert.match(result.stderr, /READONLY|readonly/, `expected a read-only rejection, got: ${result.stderr.trim()}`);
   });
 });
+
+// ---------------------------------------------------------------------------------------------------------------
+// Part 3: the dashboard is unauthenticated, so Compose must publish it on the loopback interface only.
+// This reads the resolved Compose model (no containers are started) and is bounded by a timeout.
+
+const COMPOSE_CONFIG_TIMEOUT_MS = 30_000;
+
+async function resolvedWebPorts() {
+  const { stdout } = await execFileAsync(
+    'docker',
+    ['compose', '-f', 'infra/docker/docker-compose.yml', 'config', '--format', 'json'],
+    { timeout: COMPOSE_CONFIG_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 },
+  );
+  return JSON.parse(stdout).services.web.ports;
+}
+
+test('the resolved Compose config publishes web port 3000 on 127.0.0.1 only', { timeout: COMPOSE_CONFIG_TIMEOUT_MS + 5_000 }, async () => {
+  const ports = await resolvedWebPorts();
+  const published = ports.filter((port) => Number(port.target) === 3000);
+  assert.equal(published.length, 1, 'web must publish container port 3000 exactly once');
+  assert.equal(published[0].host_ip, '127.0.0.1', 'the unauthenticated dashboard must bind to loopback, not all interfaces');
+  assert.equal(String(published[0].published), '3000');
+  assert.equal(ports.length, 1, 'web must publish no other port');
+});

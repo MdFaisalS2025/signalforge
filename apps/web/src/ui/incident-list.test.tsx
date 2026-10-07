@@ -115,3 +115,21 @@ test('the shell has exactly three navigation entries: Incidents, Deployments, De
   assert.deepEqual(labels, ['Incidents', 'Deployments', 'Demo']);
   assert.ok(markup.includes('<p>content</p>'), 'the shell must render its children');
 });
+
+test('a published incident shows its exact published_at in a publication-state tooltip', () => {
+  const markup = render({ kind: 'loaded', incidents: [incident({ publication_state: 'published' })] });
+  const tag = /<span[^>]*data-publication="published"[^>]*>/.exec(markup)?.[0] ?? '';
+  assert.ok(tag.length > 0, 'the published status element must render');
+  assert.match(tag, /title="[^"]*2026-10-03T12:00:13\.001000000Z[^"]*"/, 'the tooltip must carry the full-precision published_at');
+});
+
+test('a pending incident has no publication tooltip and invents no published time', () => {
+  const markup = render({
+    kind: 'loaded',
+    incidents: [incident({ publication_state: 'pending', published_at: null })],
+  });
+  const tag = /<span[^>]*data-publication="pending"[^>]*>/.exec(markup)?.[0] ?? '';
+  assert.ok(tag.length > 0, 'the pending status element must render');
+  assert.doesNotMatch(tag, /title=/);
+  assert.doesNotMatch(markup, /Published|published at/i);
+});

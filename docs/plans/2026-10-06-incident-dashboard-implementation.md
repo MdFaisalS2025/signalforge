@@ -1,7 +1,7 @@
 # Incident dashboard implementation plan
 
-Status: **Proposed for review.** Do not start until
-[2026-10-06-incident-dashboard.md](../specs/2026-10-06-incident-dashboard.md) is approved.
+Status: **Implemented and validated, 2026-10-07.** All tasks are complete on `feature/incident-dashboard`, pending merge.
+Spec: [2026-10-06-incident-dashboard.md](../specs/2026-10-06-incident-dashboard.md).
 Implements: the spec above, exactly. Any change to a contract in that spec is a spec change first.
 
 ## Ground rules for every task

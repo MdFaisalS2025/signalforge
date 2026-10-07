@@ -1,7 +1,6 @@
 # Incident dashboard slice
 
-Status: **Proposed for review.** Implementation must not begin until this status line is changed to
-"Approved for implementation" with an approval date.
+Status: **Implemented and validated, 2026-10-07.** The slice is built on `feature/incident-dashboard` and passed final validation, pending merge.
 Implements: the operator dashboard milestone in `SignalForge_Project_Plan.docx` section 9.11 (Week 4).
 Builds on: [2026-10-03-faulty-deployment-incident-correlation.md](2026-10-03-faulty-deployment-incident-correlation.md)
 and [ADR 0004](../decisions/0004-faulty-deployment-correlation.md), which are merged to `master`.
@@ -311,7 +310,7 @@ never include SQL or stack traces.
 
 | Port | Service | Status |
 |---|---|---|
-| `3000` | `web` (dashboard) | New. Replaces the placeholder `web` service. |
+| `127.0.0.1:3000` | `web` (dashboard) | New. Replaces the placeholder `web` service. Loopback only (section 6.1). |
 | `8123` | `clickhouse` HTTP | Existing, already published. |
 | `8081`, `8082`, `8084`, `9090`, `3001`, `4317`, `4318`, `9092` | unchanged | Unchanged. |
 
@@ -333,7 +332,7 @@ web:
     CLICKHOUSE_USER: dashboard_reader
     CLICKHOUSE_PASSWORD: changeme-local-only
   ports:
-    - "3000:3000"
+    - "127.0.0.1:3000:3000"
   depends_on:
     clickhouse:
       condition: service_healthy
@@ -344,6 +343,11 @@ web:
     retries: 5
   restart: "no"
 ```
+
+The host port is published as `127.0.0.1:3000:3000`. The dashboard is bound to localhost because it has no
+authentication (section 2), so it must not be reachable from other machines on the network. The healthcheck and the
+container-internal `PORT` are unaffected. A resolved-Compose test (`scripts/verify-incident-dashboard.test.mjs`) fails if
+`web` publishes port 3000 on any other interface.
 
 The `api` placeholder is left as it is. `web` no longer depends on `api`, because the BFF lives in `web`.
 

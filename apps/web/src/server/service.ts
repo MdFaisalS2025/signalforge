@@ -141,15 +141,20 @@ export function getDashboardService(): DashboardService {
 // Every response is no-store. Error bodies are fixed JSON. Internal details go to the server log, not to clients.
 
 const NO_STORE = 'no-store';
+// The API contract (spec 5.4) names this exact value. Response.json alone omits the charset.
+const JSON_CONTENT_TYPE = 'application/json; charset=utf-8';
 
 export function jsonResponse(body: unknown, status = 200): Response {
-  return Response.json(body, { status, headers: { 'Cache-Control': NO_STORE } });
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Cache-Control': NO_STORE, 'Content-Type': JSON_CONTENT_TYPE },
+  });
 }
 
 export function methodNotAllowed(): Response {
   return new Response(JSON.stringify({ error: 'method_not_allowed' }), {
     status: 405,
-    headers: { Allow: 'GET', 'Cache-Control': NO_STORE, 'Content-Type': 'application/json; charset=utf-8' },
+    headers: { Allow: 'GET', 'Cache-Control': NO_STORE, 'Content-Type': JSON_CONTENT_TYPE },
   });
 }
 
