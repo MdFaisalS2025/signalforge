@@ -3,8 +3,8 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or
 > superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-Status: **Proposed for review.** Do not start until
-[2026-10-07-evidence-cited-diagnosis.md](../specs/2026-10-07-evidence-cited-diagnosis.md) is approved.
+Status: **Implemented and validated, 2026-10-08** (Tasks 1 to 12; optional Task 13 not implemented). Spec:
+[2026-10-07-evidence-cited-diagnosis.md](../specs/2026-10-07-evidence-cited-diagnosis.md).
 Implements: the spec above, exactly. Any change to a contract in that spec is a spec change first.
 
 **Goal:** a Python agent that diagnoses each published incident from bounded stored evidence, persists a

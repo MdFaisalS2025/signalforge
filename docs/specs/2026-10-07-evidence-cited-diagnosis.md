@@ -1,7 +1,6 @@
 # Evidence-cited diagnosis slice
 
-Status: **Proposed for review.** Implementation must not begin until this status line is changed to
-"Approved for implementation" with an approval date.
+Status: **Implemented and validated, 2026-10-08.** The optional provider adapter (plan Task 13) is not implemented.
 Implements: the Week 5 "Evidence-First Incident Agent" milestone in `SignalForge_Project_Plan.docx`
 sections 9.6, 9.7, and 13, reduced to the smallest slice that is still demonstrable end to end.
 Builds on: [2026-10-03-faulty-deployment-incident-correlation.md](2026-10-03-faulty-deployment-incident-correlation.md)
