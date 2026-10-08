@@ -396,8 +396,11 @@ AI provider.
   migration, `Unknown table`. Record both.
 - [ ] **Step 3: Create `0002_diagnoses.sql`** with the exact table of spec 8.1.
 - [ ] **Step 4: Create `agent-writer.xml`** and mount it read-only in the `clickhouse` service, next to the dashboard
-  reader's file (mount only the file, not the directory, for the reason the dashboard plan records). Grants,
-  profile limits, and `allow_databases` are exactly those of spec 8.5.
+  reader's file (mount only the file, not the directory, for the reason the dashboard plan records). The six
+  table-qualified grants and the profile limits are exactly those of spec 8.5. Use `<grants>` only and no
+  `<allow_databases>`: ClickHouse 24.8 (tested on 24.8.14.39) refuses to start when a users-file user combines them
+  (`BAD_ARGUMENTS`), and keeping `allow_databases` without `<grants>` would grant broad privileges within
+  `signalforge`. The table-qualified grants are the scope boundary.
 - [ ] **Step 5: Apply.** `docker compose -f infra/docker/docker-compose.yml up -d --build clickhouse collector-go`
   (never `-v`). Confirm `SELECT max(version) FROM signalforge.schema_migrations` returns 2.
 - [ ] **Step 6: Re-run the Go tests and the account tests.** Expected GREEN. If ClickHouse rejects the grant syntax in

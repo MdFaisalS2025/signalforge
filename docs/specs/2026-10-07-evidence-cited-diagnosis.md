@@ -475,12 +475,21 @@ reader's file, defines `agent_writer` with a non-readonly profile and explicit g
 - `INSERT` on `signalforge.diagnoses` only.
 - No `ALTER`, `DROP`, `CREATE`, `TRUNCATE`, `SYSTEM`, or access-management grants. No access to `system.*`.
 - Profile limits: `max_execution_time = 10`, `max_rows_to_read = 5,000,000`, `max_result_rows = 1,000`.
-- `allow_databases` is `signalforge`.
+- **The table-qualified grants are the scope boundary, not `allow_databases`.** ClickHouse 24.8 (tested on
+  24.8.14.39) refuses to start when a users-file user combines `allow_databases` with explicit `<grants>`
+  (`BAD_ARGUMENTS`: other access-control settings cannot be specified with `grants`). Dropping `<grants>` to keep
+  `allow_databases` would grant broad privileges within `signalforge`, so the users file has `<grants>` only and no
+  `allow_databases` element. The six grants above are confined to the five listed `signalforge` tables, and nothing
+  else is granted: no access to `system.*`, no DDL, no access management, and no unlisted table.
 
 The existing `dashboard_reader` already reads every table in `signalforge` with `readonly = 1`, so it can read
-`diagnoses` with no change and still cannot write it. Whether ClickHouse 24.8 accepts the grant syntax inside a
-users file is verified, not assumed, by the account tests in the plan (T6). The same tests assert each denied
-operation by its error.
+`diagnoses` with no change and still cannot write it. Its own users file is separate and keeps its valid
+`allow_databases` setting: that account has no `<grants>`, so the combination does not arise there.
+
+The account tests in the plan (T6) are the proof, and they ran against ClickHouse 24.8.14.39. They assert the exact
+six rows in `system.grants`, the profile limits, the allowed reads and the one allowed insert, each denied operation by
+its `ACCESS_DENIED` error (every other insert, `ALTER`, `DROP`, `TRUNCATE`, `CREATE`, `DELETE`, `GRANT`, `SYSTEM`, and a
+read of `system.query_log`), and that `dashboard_reader` can read `diagnoses` but cannot write it (`READONLY`).
 
 ## 9. Dashboard changes
 
