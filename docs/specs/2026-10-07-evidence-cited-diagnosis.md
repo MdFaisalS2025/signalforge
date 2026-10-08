@@ -833,8 +833,9 @@ Calls use one request per attempt to `<base>/chat/completions` with `response_fo
 timeout of `AGENT_PROVIDER_TIMEOUT_S` (default 20), and at most two attempts per incident. The prompt is a fixed,
 versioned template (`diagnose-v1`) that contains only the bundle of section 8.2. The key is read from the
 environment into memory once, sent only in the `Authorization` header, and never logged, stored, or included in an
-error message. The adapter is built and tested against an in-process fake server in this slice (plan T13); no
-test and no acceptance run contacts a real provider.
+error message. The adapter itself is the optional Task 13 of the plan: it is planned, not implemented in this slice.
+Until it exists, `AGENT_PROVIDER=openai-compatible` makes the agent exit at startup, and no test and no acceptance run
+contacts a real provider.
 
 ### 13.2 Decisions that need the user
 
