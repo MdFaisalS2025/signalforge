@@ -38,6 +38,7 @@ CONFIDENCES = ("", "low", "medium", "high")
 FAILURE_CODES = ("", "validation_rejected", "invalid_incident", "bundle_too_large")
 
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+_ROW_TIMESTAMP = re.compile(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?")
 _CREATED_AT = re.compile(r"(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2}\.\d{3})Z")
 
 # Readiness: succeeds only when the table exists and the account may read it. It reads no rows.
@@ -80,6 +81,11 @@ FROM deployments FINAL
 WHERE toString(deployment_id) = {deployment_id:String}
 LIMIT 1"""
 
+# The telemetry reads are bounded in time as well as by trace ID: telemetry_events has no index on trace_id, so without a
+# time bound each read would scan every historical partition. The bound is the cited trace evidence's own time, 60 seconds
+# either side, and it is fixed before any telemetry is read, so no telemetry row can widen it.
+CONTEXT_WINDOW_SECONDS = 60
+
 # Only the three allowlisted attribute keys are extracted, as raw JSON text. The rest of `attributes` is never selected.
 SQL_SPANS = """SELECT timestamp, trace_id, span_id, deployment_id,
   JSONExtractRaw(attributes, 'span.kind') AS span_kind,
@@ -87,6 +93,7 @@ SQL_SPANS = """SELECT timestamp, trace_id, span_id, deployment_id,
   JSONExtractRaw(attributes, 'http.response.status_code') AS status_code
 FROM telemetry_events FINAL
 WHERE type = 'trace' AND service = 'demo-payments' AND trace_id IN {trace_ids:Array(String)}
+  AND timestamp >= {window_start:DateTime64(9, 'UTC')} AND timestamp <= {window_end:DateTime64(9, 'UTC')}
 ORDER BY timestamp, span_id
 LIMIT 30"""
 
@@ -94,6 +101,7 @@ SQL_LOGS = """SELECT timestamp, trace_id, severity,
   JSONExtractRaw(attributes, 'log.body') AS log_body
 FROM telemetry_events FINAL
 WHERE type = 'log' AND service = 'demo-payments' AND trace_id IN {trace_ids:Array(String)}
+  AND timestamp >= {window_start:DateTime64(9, 'UTC')} AND timestamp <= {window_end:DateTime64(9, 'UTC')}
 ORDER BY timestamp, severity
 LIMIT 30"""
 
@@ -146,6 +154,34 @@ def _positive_version(value: object, what: str) -> int:
     if isinstance(value, str) and value.isascii() and value.isdigit() and int(value) >= 1:
         return int(value)
     raise ValueError(f"{what} is not a positive integer")
+
+
+def _context_window(timestamps: list) -> tuple:
+    """(window_start, window_end) as ClickHouse DateTime64(9) text: 60 seconds before the earliest and after the latest.
+
+    Whole seconds are shifted with datetime and the nanoseconds are carried as an integer, so a window that crosses a minute,
+    hour, day, month, or year boundary is exact and nothing passes through a float. A value that is not a ClickHouse
+    DateTime64 text is a ValueError, which the loop records as an invalid incident.
+    """
+    parsed = []
+    for value in timestamps:
+        match = _ROW_TIMESTAMP.fullmatch(value) if isinstance(value, str) else None
+        if match is None:
+            raise ValueError("a trace evidence timestamp is not a DateTime64 text")
+        try:
+            seconds = datetime.datetime.strptime(match.group(1), "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            raise ValueError("a trace evidence timestamp is not a valid time") from None
+        parsed.append((seconds, int((match.group(2) or "").ljust(9, "0"))))
+    shift = datetime.timedelta(seconds=CONTEXT_WINDOW_SECONDS)
+    try:
+        earliest = min(parsed)
+        latest = max(parsed)
+        start = earliest[0] - shift
+        end = latest[0] + shift
+    except OverflowError:
+        raise ValueError("a trace evidence timestamp is out of range") from None
+    return (f"{start:%Y-%m-%d %H:%M:%S}.{earliest[1]:09d}", f"{end:%Y-%m-%d %H:%M:%S}.{latest[1]:09d}")
 
 
 def _raw_json(text: object) -> object:
@@ -304,18 +340,22 @@ class Repository:
             deployment = dict(found[0]) if found else None
 
         trace_ids: list = []
+        followed_times: list = []
         for row in evidence:
             reference = row.get("source_ref")
             if row.get("source_type") == "trace" and isinstance(reference, str) and reference not in trace_ids:
                 trace_ids.append(reference)
+                followed_times.append(row.get("timestamp"))
                 if len(trace_ids) == MAX_TRACES:
                     break
 
         spans: list = []
         logs: list = []
         if trace_ids:
-            spans = [_span_row(row) for row in self._client.query(SQL_SPANS, {"trace_ids": trace_ids})]
-            logs = [_log_row(row) for row in self._client.query(SQL_LOGS, {"trace_ids": trace_ids})]
+            window_start, window_end = _context_window(followed_times)
+            bounds = {"trace_ids": trace_ids, "window_start": window_start, "window_end": window_end}
+            spans = [_span_row(row) for row in self._client.query(SQL_SPANS, bounds)]
+            logs = [_log_row(row) for row in self._client.query(SQL_LOGS, bounds)]
         return RawIncidentData(incident=incident, evidence=evidence, deployment=deployment, spans=spans, logs=logs)
 
     def diagnosis_exists(self, incident_id: str, version: int) -> bool:

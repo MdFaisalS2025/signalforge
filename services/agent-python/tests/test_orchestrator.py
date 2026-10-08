@@ -381,8 +381,9 @@ class TransientTest(unittest.TestCase):
         self.assertEqual(outcome, Outcome("transient", error_class="ClickHouseTransient"))
         self.assertNotIn(PASSWORD, repr(outcome))
 
-    def test_a_rejection_from_the_server_is_retried_never_dead_lettered(self):
-        for code in (60, 497, 516, None):
+    def test_an_unknown_table_rejection_is_retried_never_dead_lettered(self):
+        # Every other rejection of the bounded input is permanent: see BoundedInputRejectionTest.
+        for code in (60,):
             with self.subTest(code=code):
                 repo = FakeRepo({I1: raw_fixture()})
                 repo.load_failures = [ClickHouseRejected("rejected", code=code, status=403)]
@@ -529,6 +530,77 @@ class PermanentFailureTest(unittest.TestCase):
         process_incident(candidate(), make_deps(repo, provider=FabricatingProvider()))
         row = repo.rows[0]
         self.assertEqual((row.provider, row.model_version, row.prompt_version), ("deterministic", "deterministic-rules-1", "none"))
+
+
+class BoundedInputRejectionTest(unittest.TestCase):
+    """A ClickHouse rejection while loading an incident's bounded input is permanent, unless the table is simply missing."""
+
+    def rejected(self, code):
+        return ClickHouseRejected(f"ClickHouse rejected the request (HTTP 400, code {code})", code, 400)
+
+    def test_a_rejection_other_than_unknown_table_is_recorded_as_a_failed_invalid_incident(self):
+        for code in (47, 158, 159, 241, 497, None):
+            with self.subTest(code=code):
+                repo = FakeRepo({I1: raw_fixture()})
+                repo.load_failures = [self.rejected(code)]
+                deps = make_deps(repo)
+                outcome = process_incident(candidate(), deps)
+                self.assertEqual(outcome, Outcome("written", "failed"))
+                self.assertEqual(len(repo.rows), 1)
+                row = repo.rows[0]
+                self.assertEqual((row.status, row.failure_code, row.document, row.confidence), ("failed", "invalid_incident", "", ""))
+                self.assertEqual((row.incident_id, row.diagnosis_version), (I1, 1))
+                self.assertEqual(row.input_digest, "")
+                records = deps.sink.records()
+                self.assertIn("diagnosis dead-lettered: invalid_incident", [r["message"] for r in records])
+                self.assertIn("ClickHouseRejected", [r.get("error_class") for r in records])
+                self.assertNotIn("code", json.dumps(records).lower().replace("error_class", ""))
+
+    def test_a_rejected_incident_does_not_block_the_ones_after_it(self):
+        repo = FakeRepo({I1: raw_fixture(incident_id=I1), I2: raw_fixture(incident_id=I2)})
+        repo.load_failures = [self.rejected(158)]
+        deps = make_deps(repo)
+        first = run_cycle(deps)
+        self.assertEqual((first.discovered, first.written, first.transient), (2, 2, 0))
+        self.assertEqual({row.incident_id: row.status for row in repo.rows}, {I1: "failed", I2: "completed"})
+        self.assertEqual(run_cycle(deps).discovered, 0, "the dead letter is never retried by the same analyzer")
+
+    def test_an_unknown_table_rejection_stays_transient_and_writes_nothing(self):
+        repo = FakeRepo({I1: raw_fixture()})
+        repo.load_failures = [self.rejected(60)]
+        deps = make_deps(repo)
+        first = run_cycle(deps)
+        self.assertEqual((first.written, first.transient), (0, 1))
+        self.assertEqual(repo.rows, [])
+        second = run_cycle(deps)
+        self.assertEqual((second.written, second.transient), (1, 0))
+        self.assertEqual(repo.rows[0].status, "completed")
+
+    def test_a_write_rejection_stays_transient_even_when_it_is_not_unknown_table(self):
+        for code in (60, 497, 158):
+            with self.subTest(code=code):
+                repo = FakeRepo({I1: raw_fixture()})
+                repo.write_failures = [self.rejected(code)]
+                outcome = process_incident(candidate(), make_deps(repo))
+                self.assertEqual(outcome.kind, "transient")
+                self.assertEqual(repo.rows, [])
+
+    def test_a_dead_letter_write_that_is_rejected_is_transient_and_retried(self):
+        repo = FakeRepo({I1: raw_fixture()})
+        repo.load_failures = [self.rejected(158)]
+        repo.write_failures = [self.rejected(497)]
+        deps = make_deps(repo)
+        self.assertEqual(process_incident(candidate(), deps).kind, "transient")
+        self.assertEqual(repo.rows, [])
+        repo.load_failures = [self.rejected(158)]
+        self.assertEqual(process_incident(candidate(), deps), Outcome("written", "failed"))
+
+    def test_a_transient_connectivity_failure_on_load_is_still_transient(self):
+        repo = FakeRepo({I1: raw_fixture()})
+        repo.load_failures = [ClickHouseTransient("down")]
+        outcome = process_incident(candidate(), make_deps(repo))
+        self.assertEqual(outcome.kind, "transient")
+        self.assertEqual(repo.rows, [])
 
 
 class AbstentionTest(unittest.TestCase):

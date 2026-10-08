@@ -389,8 +389,9 @@ AI provider.
   `docker compose exec -T clickhouse clickhouse-client --user agent_writer …` with argument arrays, assert: `SELECT
   count() FROM signalforge.incidents` and `…telemetry_events` succeed; `INSERT INTO signalforge.diagnoses (diagnosis_id)
   SELECT generateUUIDv4() WHERE 0` is accepted; each of `INSERT INTO signalforge.incidents`, `…evidence_items`,
-  `…deployments`, `ALTER TABLE signalforge.diagnoses ADD COLUMN x String`, `DROP TABLE signalforge.diagnoses`, and
-  `SELECT * FROM system.query_log LIMIT 1` fails with an access-denied error; `dashboard_reader` can `SELECT count()
+  `…deployments`, `ALTER TABLE signalforge.diagnoses ADD COLUMN x String`, and
+  `SELECT * FROM system.query_log LIMIT 1` fails with an access-denied error (the post-review remediation note at the end
+  replaces the destructive statements with a nonexistent probe table and a grant inspection); `dashboard_reader` can `SELECT count()
   FROM signalforge.diagnoses` and cannot insert into it (`READONLY`). Run the file with the stack up. Expected RED:
   `Authentication failed` for `agent_writer` (the account does not exist) and, after the user exists but before the
   migration, `Unknown table`. Record both.
@@ -555,7 +556,8 @@ AI provider.
   - `service.test.ts`: with no diagnosis row the detail has `diagnosis: null`; with a valid row, the document
     appears with `state`; a thrown non-unavailable error on the diagnosis query (for example an unknown-table
     rejection) yields `{ state: 'unavailable' }` while the incident, evidence, and deployment fields are unchanged;
-    `ClickHouseUnavailable` still propagates as before; the list gives `diagnosis: null` or the summary.
+    `ClickHouseUnavailable` still propagates as before; the list gives `diagnosis: null`, `{ diagnosis_version, state, confidence }`, or
+    `{ state: "unavailable", confidence: null }` (see the remediation note at the end).
   - `api.test.ts`: change the exact-key assertion to
     `['deployment', 'diagnosis', 'evidence', 'explanation', 'generated_at', 'incident']`, and assert that no
     pre-existing field changed and that `Content-Type` and `no-store` are still exact.
@@ -706,3 +708,26 @@ Run after T12, or T13 if included. Do not modify source files.
   no scoring pipeline, no second scenario. T13 is the only optional task and is isolated.
 - **Authorization.** The decisions table names every point that would need a key or external consent, and states that
   T1 to T12 need none.
+
+## Post-review remediation (2026-10-08)
+
+A final review of T1 to T12 led to one follow-up commit, `fix: address diagnosis review findings`. It changes behavior,
+not scope, and the optional T13 is still not implemented.
+
+- **List contract (T10, T11).** A list item's `diagnosis` is `null`, `{ diagnosis_version, state, confidence }` (state
+  `completed`, `abstained`, or `failed`; confidence `null` for `failed`), or exactly `{ state: "unavailable", confidence: null }`.
+  The field is `state`, not `status`. A failed or non-connectivity summary read marks every valid incident unavailable
+  instead of pending and logs the error class only; a `ClickHouseUnavailable` still gives HTTP 503. The list column reads `state`.
+- **Telemetry context window (T7).** The span and log reads add `timestamp >= {window_start:DateTime64(9, 'UTC')} AND
+  timestamp <= {window_end:DateTime64(9, 'UTC')}`, from 60 seconds before the earliest to 60 seconds after the latest cited
+  trace evidence timestamp, so they no longer scan every historical partition. The window comes from the evidence rows alone.
+- **Bounded-input rejections (T8).** A `ClickHouseRejected` other than unknown-table while loading an incident's bounded
+  input is recorded as one `failed` row with `invalid_incident`, so it cannot head the queue forever. Unknown-table,
+  connection, and write failures stay transient.
+- **Non-destructive privilege checks (T6, T12).** There is no runtime `DROP` or `TRUNCATE` probe, because ClickHouse checks
+  table existence before privilege for them. Step 9 keeps a live `ALTER TABLE signalforge.diagnoses_acceptance_probe ...`
+  probe (a table that does not exist), which is rejected with `ACCESS_DENIED`, and adds privileged grant inspection: it
+  reads `system.grants` for `agent_writer` and asserts exactly the six intended table-qualified grants, with no `DROP`,
+  `ALTER`, DDL, access-management, or `system.*` grant, no grant option, and no role. The account tests use the same safe
+  statement generator and fail if a destructive statement names a real application table. No runtime test or script issues
+  destructive DDL against a real application table.

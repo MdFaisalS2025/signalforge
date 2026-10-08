@@ -83,11 +83,13 @@ EXPECTED_SQL = {
         "JSONExtractRaw(attributes, 'span.name') AS span_name, "
         "JSONExtractRaw(attributes, 'http.response.status_code') AS status_code FROM telemetry_events FINAL "
         "WHERE type = 'trace' AND service = 'demo-payments' AND trace_id IN {trace_ids:Array(String)} "
+        "AND timestamp >= {window_start:DateTime64(9, 'UTC')} AND timestamp <= {window_end:DateTime64(9, 'UTC')} "
         "ORDER BY timestamp, span_id LIMIT 30"
     ),
     "SQL_LOGS": (
         "SELECT timestamp, trace_id, severity, JSONExtractRaw(attributes, 'log.body') AS log_body FROM telemetry_events FINAL "
         "WHERE type = 'log' AND service = 'demo-payments' AND trace_id IN {trace_ids:Array(String)} "
+        "AND timestamp >= {window_start:DateTime64(9, 'UTC')} AND timestamp <= {window_end:DateTime64(9, 'UTC')} "
         "ORDER BY timestamp, severity LIMIT 30"
     ),
     "SQL_EXISTS": (
@@ -95,6 +97,10 @@ EXPECTED_SQL = {
         "AND diagnosis_version = {diagnosis_version:UInt32} LIMIT 1"
     ),
 }
+
+# The cited trace evidence in the fixture is at 21:49:30.988, 21:49:31.046, and 21:49:31.090 (the deployment row, at
+# 21:49:26.436, is not a trace). The window is exactly 60 seconds before the earliest and after the latest of those.
+FIXTURE_WINDOW = {"window_start": "2026-10-07 21:48:30.988000000", "window_end": "2026-10-07 21:50:31.090000000"}
 
 ALLOWED_LITERALS = {"published", "trace", "log", "demo-payments", "span.kind", "span.name", "http.response.status_code", "log.body"}
 
@@ -252,14 +258,15 @@ class SqlConstantsTest(unittest.TestCase):
             with self.subTest(name=name):
                 braces = re.findall(r"\{[^{}]*\}", sql)
                 for brace in braces:
-                    self.assertRegex(brace, r"^\{[a-z_]+:[A-Za-z0-9_()]+\}$")
+                    # A type is a name, optionally with a precision and, for DateTime64, the fixed UTC zone.
+                    self.assertRegex(brace, r"^\{[a-z_]+:[A-Za-z0-9_]+(\([A-Za-z0-9_]+\)|\(\d+, 'UTC'\))?\}$")
                 self.assertEqual(sql.count("{"), sql.count("}"))
                 self.assertEqual(sql.count("{"), len(braces))
 
     def test_the_only_quoted_literals_are_the_fixed_constants_of_the_rule(self):
         for name, sql in ALL_SQL.items():
             with self.subTest(name=name):
-                for literal in re.findall(r"'([^']*)'", sql):
+                for literal in re.findall(r"'([^']*)'", re.sub(r"\{[^{}]*\}", "", sql)):
                     self.assertIn(literal, ALLOWED_LITERALS)
 
     def test_no_statement_contains_interpolation_concatenation_or_value_syntax(self):
@@ -448,8 +455,8 @@ class LoadRawTest(unittest.TestCase):
                 ("query", SQL_INCIDENT, {"incident_id": INCIDENT_ID}),
                 ("query", SQL_EVIDENCE, {"incident_id": INCIDENT_ID}),
                 ("query", SQL_DEPLOYMENT, {"deployment_id": DEPLOYMENT_ID}),
-                ("query", SQL_SPANS, {"trace_ids": [TRACE_1, TRACE_2, TRACE_3]}),
-                ("query", SQL_LOGS, {"trace_ids": [TRACE_1, TRACE_2, TRACE_3]}),
+                ("query", SQL_SPANS, {"trace_ids": [TRACE_1, TRACE_2, TRACE_3], **FIXTURE_WINDOW}),
+                ("query", SQL_LOGS, {"trace_ids": [TRACE_1, TRACE_2, TRACE_3], **FIXTURE_WINDOW}),
             ],
         )
 
@@ -528,7 +535,7 @@ class LoadRawTest(unittest.TestCase):
             raw.evidence.append(extra)
         loaded, client = self.load(raw)
         spans_call = next(call for call in client.queries() if call[1] == SQL_SPANS)
-        self.assertEqual(spans_call[2], {"trace_ids": [TRACE_1, TRACE_2, TRACE_3]})
+        self.assertEqual(spans_call[2], {"trace_ids": [TRACE_1, TRACE_2, TRACE_3], **FIXTURE_WINDOW})
         text = json.dumps(client.calls)
         for n in range(3):
             self.assertNotIn(f"{n + 1:032x}", text, "an uncited-by-limit trace must never reach a query")
@@ -603,6 +610,104 @@ class LoadRawTest(unittest.TestCase):
         with self.assertRaises(ClickHouseTransient):
             Repository(client).load_raw(INCIDENT_ID)
         self.assertEqual([call[1] for call in client.calls], [SQL_INCIDENT, SQL_EVIDENCE])
+
+
+class TelemetryWindowTest(unittest.TestCase):
+    """The span and log reads are bounded to the evidence's own time: 60 seconds either side of the cited traces."""
+
+    def window_for(self, timestamps, raw=None):
+        raw = raw or raw_fixture()
+        traces = [row for row in raw.evidence if row["source_type"] == "trace"]
+        for row, stamp in zip(traces, timestamps):
+            row["timestamp"] = stamp
+        client = FakeClient(warehouse(raw))
+        Repository(client).load_raw(INCIDENT_ID)
+        spans = next(call for call in client.queries() if call[1] == SQL_SPANS)[2]
+        logs = next(call for call in client.queries() if call[1] == SQL_LOGS)[2]
+        keys = ("window_start", "window_end")
+        self.assertEqual({k: spans[k] for k in keys}, {k: logs[k] for k in keys})
+        return spans["window_start"], spans["window_end"]
+
+    def test_both_telemetry_queries_carry_a_typed_lower_and_upper_bound_on_timestamp(self):
+        for name, sql in (("SQL_SPANS", SQL_SPANS), ("SQL_LOGS", SQL_LOGS)):
+            with self.subTest(name=name):
+                text = normalize(sql)
+                self.assertIn("timestamp >= {window_start:DateTime64(9, 'UTC')}", text)
+                self.assertIn("timestamp <= {window_end:DateTime64(9, 'UTC')}", text)
+                for kept in ("type = ", "service = 'demo-payments'", "trace_id IN {trace_ids:Array(String)}", "FROM telemetry_events FINAL"):
+                    self.assertIn(kept, text)
+
+    def test_the_bounds_are_exactly_sixty_seconds_before_the_earliest_and_after_the_latest_cited_trace(self):
+        self.assertEqual(
+            self.window_for(["2026-10-07 21:49:30.988000000", "2026-10-07 21:49:31.046000000", "2026-10-07 21:49:31.090000000"]),
+            ("2026-10-07 21:48:30.988000000", "2026-10-07 21:50:31.090000000"),
+        )
+
+    def test_nanoseconds_are_kept_exactly(self):
+        self.assertEqual(
+            self.window_for(["2026-10-07 21:49:30.000000001", "2026-10-07 21:49:30.500000000", "2026-10-07 21:49:31.123456789"]),
+            ("2026-10-07 21:48:30.000000001", "2026-10-07 21:50:31.123456789"),
+        )
+
+    def test_a_window_crossing_a_minute_or_day_boundary_stays_in_utc(self):
+        cases = [
+            (["2026-10-07 21:49:00.000000000"] * 3, ("2026-10-07 21:48:00.000000000", "2026-10-07 21:50:00.000000000")),
+            (["2026-10-07 21:00:30.000000000", "2026-10-07 21:00:30.000000000", "2026-10-07 21:59:59.999999999"],
+             ("2026-10-07 20:59:30.000000000", "2026-10-07 22:00:59.999999999")),
+            (["2026-12-31 23:59:30.500000000", "2026-12-31 23:59:45.000000000", "2027-01-01 00:00:10.000000009"],
+             ("2026-12-31 23:58:30.500000000", "2027-01-01 00:01:10.000000009")),
+            (["2026-03-01 00:00:20.123456789"] * 3, ("2026-02-28 23:59:20.123456789", "2026-03-01 00:01:20.123456789")),
+            (["2028-03-01 00:00:05.000000000"] * 3, ("2028-02-29 23:59:05.000000000", "2028-03-01 00:01:05.000000000")),
+        ]
+        for stamps, expected in cases:
+            with self.subTest(stamps=stamps):
+                self.assertEqual(self.window_for(list(stamps)), expected)
+
+    def test_the_deployment_row_and_uncited_extra_traces_do_not_move_the_window(self):
+        raw = raw_fixture()
+        for n in range(3):
+            extra = copy.deepcopy(raw.evidence[1])
+            extra.update(evidence_id=f"00000000-0000-4000-8000-00000000010{n}", source_ref=f"{n + 1:032x}",
+                         timestamp=f"2030-01-01 00:00:0{n}.000000000")
+            raw.evidence.append(extra)
+        client = FakeClient(warehouse(raw))
+        Repository(client).load_raw(INCIDENT_ID)
+        spans = next(call for call in client.queries() if call[1] == SQL_SPANS)[2]
+        self.assertEqual({k: spans[k] for k in ("window_start", "window_end")}, FIXTURE_WINDOW)
+
+    def test_no_raw_telemetry_timestamp_can_widen_the_window(self):
+        raw = raw_fixture()
+        for row in raw.spans:
+            row["timestamp"] = "1999-01-01 00:00:00.000000000"
+        for row in raw.logs:
+            row["timestamp"] = "2099-12-31 23:59:59.999999999"
+        client = FakeClient(warehouse(raw))
+        Repository(client).load_raw(INCIDENT_ID)
+        spans = next(call for call in client.queries() if call[1] == SQL_SPANS)[2]
+        logs = next(call for call in client.queries() if call[1] == SQL_LOGS)[2]
+        for params in (spans, logs):
+            self.assertEqual({k: params[k] for k in ("window_start", "window_end")}, FIXTURE_WINDOW)
+        # The window is fixed by the evidence read alone: it exists before any telemetry is read.
+        order = [call[1] for call in client.queries()]
+        self.assertLess(order.index(SQL_EVIDENCE), order.index(SQL_SPANS))
+
+    def test_an_unreadable_trace_evidence_timestamp_is_rejected_before_any_telemetry_read(self):
+        for bad in ("yesterday", "", "2026-10-07T21:49:30.988Z", "2026-13-07 21:49:30.988000000", "2026-10-07 21:49:30.9880000001"):
+            with self.subTest(bad=bad):
+                raw = raw_fixture()
+                next(row for row in raw.evidence if row["source_type"] == "trace")["timestamp"] = bad
+                client = FakeClient(warehouse(raw))
+                with self.assertRaises(ValueError):
+                    Repository(client).load_raw(INCIDENT_ID)
+                self.assertNotIn(SQL_SPANS, [call[1] for call in client.calls])
+                self.assertNotIn(SQL_LOGS, [call[1] for call in client.calls])
+
+    def test_the_window_parameters_are_the_only_new_parameters_and_are_text(self):
+        client = FakeClient(warehouse(raw_fixture()))
+        Repository(client).load_raw(INCIDENT_ID)
+        spans = next(call for call in client.queries() if call[1] == SQL_SPANS)[2]
+        self.assertEqual(sorted(spans), ["trace_ids", "window_end", "window_start"])
+        self.assertTrue(all(isinstance(spans[k], str) for k in ("window_start", "window_end")))
 
 
 class DiagnosisExistsTest(unittest.TestCase):

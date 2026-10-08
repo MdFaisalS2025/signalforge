@@ -6,7 +6,7 @@
 // It checks the newest incident (or the one given) in twelve steps and stops at the first failure. It creates no
 // deployment and sends no order. Its only side effect is `docker compose restart agent-python` in step 10, which
 // proves a restarted agent does not rewrite a diagnosis. The account probes in step 9 are attempts that the
-// restricted accounts must reject, and the one write (a zero-row insert) cannot change data.
+// restricted accounts must reject, and the grants are inspected. No check runs DDL against a real table, and the one write is a zero-row insert.
 //
 // Every request has a deadline, every wait is a bounded poll, and no step sleeps for a fixed expected duration.
 // Child processes use argument arrays and no shell. Output is one `PASS <n> <name>` line per step and a final PASS.
@@ -38,6 +38,8 @@ const COMPOSE_FILE = path.join(REPO_ROOT, 'infra', 'docker', 'docker-compose.yml
 const LOCAL_PASSWORD = 'changeme-local-only';
 const AGENT = 'agent_writer';
 const READER = 'dashboard_reader';
+// The privileged local account, used only to read grants. It is never printed.
+const ADMIN = 'default';
 
 // The fixed namespace shared by every deterministic identity in the system.
 const NAMESPACE = '8f3c2a9e-5d1b-4f6a-b7c8-2e9d0a1b3c4d';
@@ -59,7 +61,7 @@ export const STEPS = Object.freeze([
   { n: 6, id: 'hypothesis', name: 'hypothesis names the deployment and confidence is high' },
   { n: 7, id: 'detail-page', name: 'incident page shows the cause, chips, and a non-interactive recommendation' },
   { n: 8, id: 'list-page', name: 'incident list shows a high diagnosis' },
-  { n: 9, id: 'accounts', name: 'restricted accounts can do only what they should' },
+  { n: 9, id: 'accounts', name: 'restricted accounts can do only what they should, and hold no DDL grant' },
   { n: 10, id: 'idempotent-restart', name: 'agent restart leaves the stored diagnosis unchanged' },
   { n: 11, id: 'no-leaks', name: 'no body or log leaks SQL, driver codes, credentials, or headers' },
   { n: 12, id: 'no-remediation', name: 'Payments deployment count is unchanged' },
@@ -277,34 +279,140 @@ const clickhouse = (user, queryArgs, signal) =>
 
 const DENIED = /ACCESS_DENIED|Not enough privileges/;
 
-// Step 9. The same probes as the established account tests. Denied statements must be rejected for lack of privilege,
-// not for some other reason, so a missing table or account cannot pass. The inserts write zero rows.
-export async function dockerAccountProbes(signal) {
-  const asAgent = (sql) => clickhouse(AGENT, ['--query', sql], signal);
-  const asReader = (sql) => clickhouse(READER, ['--query', sql], signal);
-  for (const table of ['incidents', 'telemetry_events']) {
-    const result = await asAgent(`SELECT count() FROM signalforge.${table}`);
-    if (result.code !== 0 || !/^\d+$/.test(result.stdout.trim())) return { ok: false, detail: `${AGENT} cannot read ${table}` };
-  }
-  const allowed = await asAgent('INSERT INTO signalforge.diagnoses (diagnosis_id) SELECT generateUUIDv4() WHERE 0');
-  if (allowed.code !== 0) return { ok: false, detail: `${AGENT} cannot insert into diagnoses` };
-  const denied = [
-    ['insert into incidents', 'INSERT INTO signalforge.incidents (incident_id) SELECT generateUUIDv4() WHERE 0'],
-    ['insert into evidence_items', 'INSERT INTO signalforge.evidence_items (evidence_id) SELECT generateUUIDv4() WHERE 0'],
-    ['insert into deployments', 'INSERT INTO signalforge.deployments (deployment_id) SELECT generateUUIDv4() WHERE 0'],
-    ['alter diagnoses', 'ALTER TABLE signalforge.diagnoses ADD COLUMN acceptance_probe String'],
-    ['drop diagnoses', 'DROP TABLE signalforge.diagnoses'],
-    ['read system.query_log', 'SELECT * FROM system.query_log LIMIT 1'],
+// Step 9. The privilege checks, as data so a test can read every statement before it runs. No runtime check issues
+// destructive DDL against a real application table, and there is no DROP or TRUNCATE at all: ClickHouse checks that the
+// table exists before it checks the privilege for those, so against a table that does not exist they prove nothing, and
+// against one that does they would be dangerous. The absence of DROP, ALTER, DDL, access-management, and system authority
+// is proved instead by inspecting the grants with the privileged local account (evaluateGrants). The ALTER probe below
+// does return ACCESS_DENIED before the existence check, and it names a table that does not exist
+// (diagnoses_acceptance_probe), so an over-privileged account still could not damage stored data through it.
+const PROBE_TABLE = 'diagnoses_acceptance_probe';
+
+export function accountProbeStatements() {
+  const zeroRow = (table, column) => `INSERT INTO signalforge.${table} (${column}) SELECT generateUUIDv4() WHERE 0`;
+  return [
+    { what: 'read incidents', user: AGENT, expect: 'allowed', sql: 'SELECT count() FROM signalforge.incidents', rows: true },
+    { what: 'read telemetry_events', user: AGENT, expect: 'allowed', sql: 'SELECT count() FROM signalforge.telemetry_events', rows: true },
+    { what: 'insert into diagnoses', user: AGENT, expect: 'allowed', sql: zeroRow('diagnoses', 'diagnosis_id') },
+    { what: 'insert into incidents', user: AGENT, expect: 'denied', sql: zeroRow('incidents', 'incident_id') },
+    { what: 'insert into evidence_items', user: AGENT, expect: 'denied', sql: zeroRow('evidence_items', 'evidence_id') },
+    { what: 'insert into deployments', user: AGENT, expect: 'denied', sql: zeroRow('deployments', 'deployment_id') },
+    { what: 'alter a table', user: AGENT, expect: 'denied', sql: `ALTER TABLE signalforge.${PROBE_TABLE} ADD COLUMN acceptance_probe String` },
+    { what: 'read system.query_log', user: AGENT, expect: 'denied', sql: 'SELECT * FROM system.query_log LIMIT 1' },
+    { what: 'insert into diagnoses', user: READER, expect: 'readonly', sql: zeroRow('diagnoses', 'diagnosis_id') },
   ];
-  for (const [what, sql] of denied) {
-    const result = await asAgent(sql);
-    if (result.code === 0) return { ok: false, detail: `${AGENT} could ${what}` };
-    if (!DENIED.test(result.stderr)) return { ok: false, detail: `${AGENT} ${what} was not rejected for lack of privilege` };
+}
+
+// More statements agent_writer must be denied, for the account tests. Every one targets the nonexistent probe table or
+// names none, and ClickHouse answers each with ACCESS_DENIED before it looks for the table.
+export function deniedAdminStatements() {
+  const table = `signalforge.${PROBE_TABLE}`;
+  return [
+    `ALTER TABLE ${table} ADD COLUMN acceptance_probe String`,
+    `ALTER TABLE ${table} DELETE WHERE 0`,
+    `CREATE TABLE ${table} (x UInt8) ENGINE = Memory`,
+    `RENAME TABLE ${table} TO signalforge.${PROBE_TABLE}_renamed`,
+    `OPTIMIZE TABLE ${table}`,
+    `GRANT SELECT ON ${table} TO agent_writer`,
+    'SYSTEM FLUSH LOGS',
+  ].map((sql) => ({ what: 'administer the schema', user: AGENT, expect: 'denied', sql }));
+}
+
+// Returns the statements that could harm a real application table. DROP, TRUNCATE, and UNDROP are never allowed. Any other
+// destructive statement may reference only the nonexistent probe table (or a name derived from it), never a real table, a
+// wildcard, or a system table. An empty result means every statement is safe to run.
+export function findUnsafeStatements(statements) {
+  // A statement is destructive by its leading verb (SYSTEM as a verb, not the system database). DROP, TRUNCATE, and
+  // UNDROP are banned wherever they appear.
+  const destructive = /^\s*(DROP|ALTER|TRUNCATE|CREATE|RENAME|DELETE|OPTIMIZE|DETACH|ATTACH|REVOKE|GRANT|SYSTEM|KILL|UNDROP|EXCHANGE|MOVE)\b/i;
+  const banned = /\b(DROP|TRUNCATE|UNDROP)\b/i;
+  const reference = /\b([a-z_][a-z0-9_]*)\.(\*|[a-z_][a-z0-9_]*)/gi;
+  const probe = new RegExp(`^${PROBE_TABLE}(_[a-z0-9]+)?$`);
+  const unsafe = [];
+  for (const { sql } of statements) {
+    for (const part of String(sql).split(';')) {
+      if (banned.test(part)) {
+        unsafe.push({ sql, reason: 'a DROP or TRUNCATE statement' });
+        break;
+      }
+      if (!destructive.test(part)) continue;
+      const offending = [...part.matchAll(reference)].filter(([, db, name]) => !(db.toLowerCase() === 'signalforge' && probe.test(name.toLowerCase())));
+      if (offending.length > 0) {
+        unsafe.push({ sql, reason: 'a destructive statement that names something other than the probe table' });
+        break;
+      }
+    }
   }
-  const reader = await asReader('INSERT INTO signalforge.diagnoses (diagnosis_id) SELECT generateUUIDv4() WHERE 0');
-  if (reader.code === 0) return { ok: false, detail: `${READER} could insert into diagnoses` };
-  if (!/READONLY|readonly/.test(reader.stderr)) return { ok: false, detail: `${READER} insert was not rejected as read-only` };
-  return { ok: true, detail: 'agent_writer reads and inserts only where granted; every other write, DDL, and system read is denied' };
+  return unsafe;
+}
+
+const INTENDED_GRANTS = [
+  'INSERT signalforge.diagnoses',
+  'SELECT signalforge.deployments',
+  'SELECT signalforge.diagnoses',
+  'SELECT signalforge.evidence_items',
+  'SELECT signalforge.incidents',
+  'SELECT signalforge.telemetry_events',
+];
+
+// Judges the rows of system.grants for agent_writer, plus the number of roles it holds. Exactly the six intended
+// table-qualified grants pass: SELECT on five tables and INSERT on diagnoses. A grant of any other access type (DROP, ALTER,
+// CREATE, TRUNCATE, access management, SHOW, SYSTEM, ALL, ...), on another table or database or on the system database, at
+// column level, with a grant option, as a partial revoke, or through a role fails. The detail names the access type and
+// table, never a credential.
+export function evaluateGrants(rows, roleCount) {
+  if (!Array.isArray(rows)) return { ok: false, detail: 'the grants could not be read' };
+  const seen = [];
+  for (const row of rows) {
+    if (!isObject(row)) return { ok: false, detail: 'a grant row was unreadable' };
+    const type = typeof row.access_type === 'string' && /^[A-Za-z ]{1,40}$/.test(row.access_type) ? row.access_type : 'an unreadable type';
+    if (row.access_type !== 'SELECT' && row.access_type !== 'INSERT') {
+      return { ok: false, detail: `agent_writer holds a ${type} grant` };
+    }
+    if (row.database !== 'signalforge' || typeof row.table !== 'string' || row.table === '') {
+      return { ok: false, detail: `agent_writer holds a ${type} grant that is not table-qualified in signalforge` };
+    }
+    if (row.column !== null && row.column !== undefined) return { ok: false, detail: `agent_writer holds a column-level ${type} grant` };
+    if (Number(row.is_partial_revoke) !== 0) return { ok: false, detail: 'agent_writer has a partial revoke' };
+    if (Number(row.grant_option) !== 0) return { ok: false, detail: `agent_writer can pass on its ${type} grant` };
+    seen.push(`${row.access_type} signalforge.${row.table}`);
+  }
+  if (new Set(seen).size !== seen.length) return { ok: false, detail: 'agent_writer holds a duplicated grant' };
+  const extra = seen.filter((grant) => !INTENDED_GRANTS.includes(grant));
+  if (extra.length > 0) return { ok: false, detail: `agent_writer holds an unintended grant: ${extra[0]}` };
+  const missing = INTENDED_GRANTS.filter((grant) => !seen.includes(grant));
+  if (missing.length > 0) return { ok: false, detail: `agent_writer lacks the intended grant: ${missing[0]}` };
+  if (roleCount !== 0) return { ok: false, detail: 'agent_writer holds a role, whose grants this inspection cannot see' };
+  return { ok: true, detail: 'exactly SELECT on five tables and INSERT on diagnoses; no DROP, ALTER, DDL, access-management, or system grant' };
+}
+
+export async function dockerAccountProbes(signal) {
+  for (const probe of accountProbeStatements()) {
+    const result = await clickhouse(probe.user, ['--query', probe.sql], signal);
+    const who = `${probe.user} ${probe.what}`;
+    if (probe.expect === 'allowed') {
+      if (result.code !== 0 || (probe.rows && !/^\d+$/.test(result.stdout.trim()))) return { ok: false, detail: `${who} was refused` };
+    } else if (result.code === 0) {
+      return { ok: false, detail: `${who} was accepted` };
+    } else if (probe.expect === 'denied' && !DENIED.test(result.stderr)) {
+      return { ok: false, detail: `${who} was not rejected for lack of privilege` };
+    } else if (probe.expect === 'readonly' && !/READONLY|readonly/.test(result.stderr)) {
+      return { ok: false, detail: `${who} was not rejected as read-only` };
+    }
+  }
+  // The privileged local account reads the grants (SHOW GRANTS needs access management, which even that account lacks, so
+  // system.grants is read instead). This is what proves there is no DROP, ALTER, DDL, or access-management authority.
+  const grants = await clickhouse(ADMIN, ['--query',
+    `SELECT access_type, database, table, column, is_partial_revoke, grant_option FROM system.grants WHERE user_name = '${AGENT}' FORMAT JSONEachRow`], signal);
+  const roles = await clickhouse(ADMIN, ['--query', `SELECT count() FROM system.role_grants WHERE user_name = '${AGENT}' FORMAT TSV`], signal);
+  if (grants.code !== 0 || roles.code !== 0 || !/^\d+$/.test(roles.stdout.trim())) return { ok: false, detail: 'the grants could not be read' };
+  let rows;
+  try {
+    rows = grants.stdout.split('\n').filter((line) => line.trim()).map((line) => JSON.parse(line));
+  } catch {
+    return { ok: false, detail: 'the grants could not be read' };
+  }
+  return evaluateGrants(rows, Number(roles.stdout.trim()));
 }
 
 // The stored rows for (incident, version 1), counted without FINAL, and the first document's exact text.

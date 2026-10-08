@@ -33,7 +33,7 @@ from .chclient import ClickHouseClient, ClickHouseRejected, ClickHouseTransient
 from .config import AgentConfig
 from .health import touch_heartbeat
 from .provider import DeterministicProvider, Provider
-from .repository import Candidate, DiagnosisRow, Repository
+from .repository import UNKNOWN_TABLE_CODE, Candidate, DiagnosisRow, Repository
 from .validator import ValidationRejected, validate
 
 EXIT_OK = 0
@@ -245,6 +245,13 @@ def _diagnose(candidate: Candidate, deps: Deps) -> Outcome:
     except ValueError as error:
         # Malformed incident or evidence rows, or an incident that is gone. ClickHouse errors are not ValueErrors.
         return _dead_letter(candidate, deps, "invalid_incident", type(error).__name__, now)
+    except ClickHouseRejected as rejection:
+        # ClickHouse refused this incident's bounded input, and asking again will not change that. Recording it keeps one
+        # such incident from heading the queue forever. A missing table is different: the migration may still arrive, so
+        # that case stays transient. Failures to connect and failures to write are never this branch.
+        if rejection.code == UNKNOWN_TABLE_CODE:
+            raise
+        return _dead_letter(candidate, deps, "invalid_incident", "ClickHouseRejected", now)
 
     document = deps.provider.diagnose(bundle, candidate.next_version, now)
     try:

@@ -471,11 +471,12 @@ test('list items gain a diagnosis summary, null when the incident has none', asy
   assert.deepEqual([...asked].sort(), [INCIDENT_A, INCIDENT_B].sort());
   const byId = new Map(result.incidents.map((i) => [i.incident_id, i]));
   assert.equal(byId.get(INCIDENT_A)?.diagnosis, null);
-  assert.deepEqual(byId.get(INCIDENT_B)?.diagnosis, { diagnosis_version: 2, status: 'abstained', confidence: 'low' });
+  assert.deepEqual(byId.get(INCIDENT_B)?.diagnosis, { diagnosis_version: 2, state: 'abstained', confidence: 'low' });
+  assert.ok(!('status' in (byId.get(INCIDENT_B)?.diagnosis ?? {})), 'the list shape uses state, not status');
   assert.equal(byId.get(INCIDENT_A)?.deployment_version, '0.2.0-faulty', 'existing fields are unchanged');
 });
 
-test('list diagnosis degrades to null for every item when the summary read is rejected', async () => {
+test('list diagnosis is unavailable for every item when the summary read is rejected', async () => {
   const { svc, logs } = loggedService(
     fakeRepo({
       listIncidents: async () => [incidentRow()],
@@ -487,11 +488,47 @@ test('list diagnosis degrades to null for every item when the summary read is re
   );
   const result = await svc.listIncidents(undefined);
   assert.equal(result.incidents.length, 1);
-  assert.equal(result.incidents[0].diagnosis, null);
-  assert.equal(logs.length, 1);
+  assert.deepEqual(result.incidents[0].diagnosis, { state: 'unavailable', confidence: null });
+  assert.ok(!('diagnosis_version' in (result.incidents[0].diagnosis ?? {})), 'no version is invented');
+  assert.deepEqual(logs, [
+    { level: 'error', message: 'diagnosis unavailable', operation: 'listIncidents', error_class: 'DiagnosisUnavailable' },
+  ]);
+  assert.equal(result.incidents[0].deployment_version, '0.2.0-faulty', 'the incident itself is unchanged');
 });
 
-test('an invalid summary row is dropped rather than shown, and an empty list asks nothing', async () => {
+test('any other summary-read failure also marks every valid incident unavailable, logging only the class', async () => {
+  const { svc, logs } = loggedService(
+    fakeRepo({
+      listIncidents: async () => [incidentRow({ incident_id: INCIDENT_A }), incidentRow({ incident_id: INCIDENT_B })],
+      getDeployment: async () => deploymentRow(),
+      latestDiagnoses: async () => {
+        throw new TypeError('secret table text');
+      },
+    }),
+  );
+  const result = await svc.listIncidents(undefined);
+  assert.deepEqual(result.incidents.map((item) => item.diagnosis), [
+    { state: 'unavailable', confidence: null },
+    { state: 'unavailable', confidence: null },
+  ]);
+  assert.ok(!JSON.stringify(logs).includes('secret'));
+  assert.equal(logs[0].error_class, 'TypeError');
+});
+
+test('incidents with no stored diagnosis stay null even when others are present', async () => {
+  const result = await service(
+    fakeRepo({
+      listIncidents: async () => [incidentRow({ incident_id: INCIDENT_A }), incidentRow({ incident_id: INCIDENT_B })],
+      getDeployment: async () => deploymentRow(),
+      latestDiagnoses: async () => [{ incident_id: INCIDENT_A, diagnosis_version: 1, status: 'failed', confidence: '' }],
+    }),
+  ).listIncidents(undefined);
+  const byId = new Map(result.incidents.map((item) => [item.incident_id, item.diagnosis]));
+  assert.deepEqual(byId.get(INCIDENT_A), { diagnosis_version: 1, state: 'failed', confidence: null });
+  assert.equal(byId.get(INCIDENT_B), null);
+});
+
+test('an invalid summary row is shown as unavailable, and an empty list asks nothing', async () => {
   const result = await service(
     fakeRepo({
       listIncidents: async () => [incidentRow()],
@@ -499,7 +536,7 @@ test('an invalid summary row is dropped rather than shown, and an empty list ask
       latestDiagnoses: async () => [{ incident_id: INCIDENT_A, diagnosis_version: 1, status: 'completed', confidence: 'certain' }],
     }),
   ).listIncidents(undefined);
-  assert.equal(result.incidents[0].diagnosis, null);
+  assert.deepEqual(result.incidents[0].diagnosis, { state: 'unavailable', confidence: null });
 
   let calls = 0;
   const empty = await service(

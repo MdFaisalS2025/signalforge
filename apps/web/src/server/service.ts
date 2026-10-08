@@ -1,7 +1,12 @@
 // The read-only dashboard service. It composes the Task 3 validator, the Task 4 repository, and the Task 5 pure
 // mappings. It has no writes, no dynamic SQL, and no fallback data. The HTTP helpers at the end turn its outcomes
 // into responses, so every route shares one error mapping.
-import { ClickHouseUnavailable, createClickHouseReaderFromEnv, type ClickHouseReader } from './clickhouse';
+import {
+  ClickHouseUnavailable,
+  createClickHouseReaderFromEnv,
+  type ClickHouseReader,
+  type DiagnosisSummaryRow,
+} from './clickhouse';
 import { parseDiagnosis, UNAVAILABLE, type DiagnosisPayload } from './diagnosis';
 import {
   explainIncident,
@@ -10,6 +15,7 @@ import {
   toDiagnosisSummary,
   toEvidenceItem,
   toIncidentItem,
+  UNAVAILABLE_SUMMARY,
   type DeploymentDetail,
   type DeploymentItem,
   type DiagnosisSummary,
@@ -88,18 +94,21 @@ export function createDashboardService({ repo, now, log = consoleLog }: ServiceD
       const rows = await repo.listIncidents(limit);
       const versions = await deploymentVersions(rows.map((row) => row.deployment_id));
       const summaries = new Map<string, DiagnosisSummary>();
+      // null means the read failed (not that nothing was found), so every incident shows an unavailable diagnosis
+      // rather than a pending one. A connectivity failure still propagates as 503 from diagnosisOr.
       const summaryRows =
         rows.length === 0
           ? []
-          : await diagnosisOr('listIncidents', () => repo.latestDiagnoses(rows.map((row) => row.incident_id)), []);
-      for (const summaryRow of summaryRows) {
-        const summary = toDiagnosisSummary(summaryRow);
-        if (summary !== null) summaries.set(summaryRow.incident_id, summary);
-      }
+          : await diagnosisOr<DiagnosisSummaryRow[] | null>(
+              'listIncidents',
+              () => repo.latestDiagnoses(rows.map((row) => row.incident_id)),
+              null,
+            );
+      for (const summaryRow of summaryRows ?? []) summaries.set(summaryRow.incident_id, toDiagnosisSummary(summaryRow));
       const incidents = rows
         .map((row): IncidentListItem => ({
           ...toIncidentItem(row, versions.get(row.deployment_id) ?? null),
-          diagnosis: summaries.get(row.incident_id) ?? null,
+          diagnosis: summaryRows === null ? UNAVAILABLE_SUMMARY : (summaries.get(row.incident_id) ?? null),
         }))
         // Fixed-width UTC text, so a plain string comparison orders by time, newest first.
         .sort((a, b) => (a.detected_at < b.detected_at ? 1 : a.detected_at > b.detected_at ? -1 : 0));

@@ -284,25 +284,25 @@ function evidenceFixture(): EvidenceRow {
   };
 }
 
-test('toDiagnosisSummary exposes only the version, the status, and the confidence', () => {
+test('toDiagnosisSummary exposes only the version, the state, and the confidence', () => {
   assert.deepEqual(
     toDiagnosisSummary({ incident_id: INCIDENT_ID, diagnosis_version: 2, status: 'completed', confidence: 'high' }),
-    { diagnosis_version: 2, status: 'completed', confidence: 'high' },
+    { diagnosis_version: 2, state: 'completed', confidence: 'high' },
   );
   assert.deepEqual(
     toDiagnosisSummary({ incident_id: INCIDENT_ID, diagnosis_version: 1, status: 'abstained', confidence: 'low' }),
-    { diagnosis_version: 1, status: 'abstained', confidence: 'low' },
+    { diagnosis_version: 1, state: 'abstained', confidence: 'low' },
   );
 });
 
 test('toDiagnosisSummary reports a failed diagnosis with a null confidence', () => {
   assert.deepEqual(
     toDiagnosisSummary({ incident_id: INCIDENT_ID, diagnosis_version: 3, status: 'failed', confidence: '' }),
-    { diagnosis_version: 3, status: 'failed', confidence: null },
+    { diagnosis_version: 3, state: 'failed', confidence: null },
   );
 });
 
-test('toDiagnosisSummary returns null for any row that is not a valid summary', () => {
+test('toDiagnosisSummary reports any row that is not a valid summary as unavailable, with no version', () => {
   const bad = [
     { diagnosis_version: 0, status: 'completed', confidence: 'high' },
     { diagnosis_version: 1.5, status: 'completed', confidence: 'high' },
@@ -314,6 +314,10 @@ test('toDiagnosisSummary returns null for any row that is not a valid summary', 
     { diagnosis_version: 1, status: 'failed', confidence: 'low' },
   ];
   for (const row of bad) {
-    assert.equal(toDiagnosisSummary({ incident_id: INCIDENT_ID, ...row } as never), null, JSON.stringify(row));
+    assert.deepEqual(
+      toDiagnosisSummary({ incident_id: INCIDENT_ID, ...row } as never),
+      { state: 'unavailable', confidence: null },
+      JSON.stringify(row),
+    );
   }
 });

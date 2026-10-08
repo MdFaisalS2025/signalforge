@@ -149,7 +149,7 @@ test('the list shows confidence as a dot plus its word for a completed diagnosis
   for (const level of ['high', 'medium', 'low'] as const) {
     const markup = render({
       kind: 'loaded',
-      incidents: [incident({ diagnosis: { diagnosis_version: 1, status: 'completed', confidence: level } } as never)],
+      incidents: [incident({ diagnosis: { diagnosis_version: 1, state: 'completed', confidence: level } } as never)],
     });
     const cell = diagnosisCell(markup);
     assert.match(cell, new RegExp(`data-diagnosis="${level}"`));
@@ -160,12 +160,14 @@ test('the list shows confidence as a dot plus its word for a completed diagnosis
 
 test('the list shows abstained, failed, pending, and unavailable as words', () => {
   const cases: Array<[unknown, string]> = [
-    [{ diagnosis_version: 1, status: 'abstained', confidence: 'low' }, 'abstained'],
-    [{ diagnosis_version: 1, status: 'failed', confidence: null }, 'failed'],
+    [{ diagnosis_version: 1, state: 'abstained', confidence: 'low' }, 'abstained'],
+    [{ diagnosis_version: 1, state: 'failed', confidence: null }, 'failed'],
     [null, 'pending'],
     [undefined, 'pending'],
-    [{ diagnosis_version: 1, status: 'surprising', confidence: null }, 'unavailable'],
-    [{ diagnosis_version: 1, status: 'completed', confidence: null }, 'unavailable'],
+    [{ state: 'unavailable', confidence: null }, 'unavailable'],
+    [{ diagnosis_version: 1, state: 'surprising', confidence: null }, 'unavailable'],
+    [{ diagnosis_version: 1, state: 'completed', confidence: null }, 'unavailable'],
+    [{ diagnosis_version: 1, status: 'completed', confidence: 'high' }, 'unavailable'],
   ];
   for (const [diagnosis, word] of cases) {
     const markup = render({ kind: 'loaded', incidents: [incident({ diagnosis } as never)] });
@@ -178,7 +180,7 @@ test('the list shows abstained, failed, pending, and unavailable as words', () =
 test('the Diagnosis cell is text only, and the only link in a row is the incident link', () => {
   const markup = render({
     kind: 'loaded',
-    incidents: [incident({ diagnosis: { diagnosis_version: 1, status: 'completed', confidence: 'high' } } as never)],
+    incidents: [incident({ diagnosis: { diagnosis_version: 1, state: 'completed', confidence: 'high' } } as never)],
   });
   assert.ok(!diagnosisCell(markup).includes('<a'));
   assert.equal(count(markup, '<a '), 1);

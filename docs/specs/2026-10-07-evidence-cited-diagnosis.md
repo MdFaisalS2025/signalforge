@@ -393,7 +393,15 @@ from bounded, read-only queries on exactly these sources for one `incident_id`:
 | `telemetry_events FINAL`, type `log` | the same trace IDs, `LIMIT 30` | `timestamp`, `trace_id`, `severity`, and `log.body` only when it equals one of a fixed list of known templates (below) |
 
 The cited trace IDs are the `source_ref` values of the evidence rows whose `source_type` is `trace`, at most
-three. No other telemetry is read. There is no free-form search, no time-window scan, and no other table.
+three. No other telemetry is read. There is no free-form search and no other table.
+
+**Telemetry context window.** `telemetry_events` has no index on `trace_id`, so both telemetry reads carry a time bound
+as well: `timestamp >= {window_start:DateTime64(9, 'UTC')} AND timestamp <= {window_end:DateTime64(9, 'UTC')}`. The window
+is exactly 60 seconds before the earliest and 60 seconds after the latest timestamp of the cited trace evidence rows (the
+rows whose IDs are followed; the deployment row and any trace beyond the third do not count). The bounds are computed with
+integer nanoseconds and exact UTC calendar arithmetic, so a window can cross a minute, day, month, or year boundary, and they
+are fixed from the evidence rows before any telemetry is read, so no telemetry timestamp can widen them. A trace evidence
+timestamp that is not a ClickHouse `DateTime64` text is a malformed incident (`invalid_incident`).
 
 **Log body allowlist.** `demo-payments` logs fixed message templates: `request received`, `request completed`,
 `charge failed`, and `charge request validation failed`. A log row whose `log.body` is not exactly one of those
@@ -445,10 +453,13 @@ Failures fall into three classes, handled differently:
 |---|---|---|
 | **Transient** | ClickHouse connection refused, timeout, HTTP 5xx; the migration has not run yet | Write nothing. Log one line with the error class and attempt number. Retry on the next cycle with exponential backoff capped at 30 seconds (1, 2, 4, 8, 16, 30). The incident stays a candidate. There is no attempt cap, because a transient outage must not lose the incident. |
 | **Result** | The evidence is insufficient or the rule is unknown | Not a failure. A `completed` or `abstained` diagnosis is written (section 7.6). |
-| **Permanent** | The validator rejects the analyzer's own output; the incident row is malformed; the bundle is too large | Write one `failed` row (the dead letter) and stop retrying this incident for this analyzer. |
+| **Permanent** | The validator rejects the analyzer's own output; the incident row is malformed; the bundle is too large; ClickHouse rejects the incident's bounded input (any `ClickHouseRejected` while loading it other than unknown table) | Write one `failed` row (the dead letter) and stop retrying this incident for this analyzer. |
 
 The permanent codes are fixed: `validation_rejected` (the rule codes of section 7.5 are logged, not stored),
-`invalid_incident`, and `bundle_too_large`. A `failed` row has an empty `document` and an empty `confidence`.
+`invalid_incident`, and `bundle_too_large`. A server rejection of an incident's bounded input is recorded as
+`invalid_incident`, so one such incident cannot head the oldest-first queue forever and starve every later incident. An
+unknown-table rejection stays transient, because the migration may still arrive. A connection failure and a failed write
+(including a failed dead-letter write) also stay transient: the database may recover, and nothing is lost by waiting. A `failed` row has an empty `document` and an empty `confidence`.
 The dashboard shows "Diagnosis failed" with the code. Because the `failed` row has a version, it participates in
 revisioning: under `on-analyzer-change`, a new analyzer re-attempts the incident (section 6.3).
 
@@ -487,8 +498,11 @@ The existing `dashboard_reader` already reads every table in `signalforge` with 
 
 The account tests in the plan (T6) are the proof, and they ran against ClickHouse 24.8.14.39. They assert the exact
 six rows in `system.grants`, the profile limits, the allowed reads and the one allowed insert, each denied operation by
-its `ACCESS_DENIED` error (every other insert, `ALTER`, `DROP`, `TRUNCATE`, `CREATE`, `DELETE`, `GRANT`, `SYSTEM`, and a
-read of `system.query_log`), and that `dashboard_reader` can read `diagnoses` but cannot write it (`READONLY`).
+its `ACCESS_DENIED` error (every other insert, `ALTER`, `CREATE`, `DELETE`, `RENAME`, `OPTIMIZE`, `GRANT`, `SYSTEM`, and a
+read of `system.query_log`), and that `dashboard_reader` can read `diagnoses` but cannot write it (`READONLY`). Authority to
+`DROP` or `TRUNCATE` is proved absent by the grant inspection, not by running those statements: ClickHouse checks that the
+table exists before it checks the privilege for them, so they would prove nothing against a missing table and would be
+dangerous against a real one. No runtime test issues destructive DDL against a real application table.
 
 ## 9. Dashboard changes
 
@@ -524,8 +538,15 @@ Both use bound parameters. Q9 is bounded by the incident-list limit (at most 100
 ```
 
 - `diagnosis` is `null` when no row exists yet (pending).
-- `state` is `completed`, `abstained`, `failed`, or `unavailable`. `confidence` is `low`, `medium`, `high`, or
-  `null` (for `failed` and `unavailable`).
+- `state` is `completed`, `abstained`, `failed`, or `unavailable`. The field is named `state`, never `status`.
+  `confidence` is `low`, `medium`, `high`, or `null` (for `failed` and `unavailable`).
+- `completed` and `abstained` carry `diagnosis_version`, `state`, and `confidence`. `failed` carries `diagnosis_version`,
+  `state: "failed"`, and `confidence: null`.
+- An unreadable diagnosis is exactly `{ "state": "unavailable", "confidence": null }`, with no `diagnosis_version`, because
+  no version can be trusted. It is used for a summary row that breaks the stored-row rules, and for every otherwise-valid
+  incident when the summary read fails with anything other than `ClickHouseUnavailable` (an unmigrated database, a
+  rejected query). It is never `null` in that case, so an unreadable table is not shown as pending. The error class alone
+  is logged. A `ClickHouseUnavailable` error keeps its meaning and returns HTTP 503 for the whole response.
 
 `GET /api/incidents/{incident_id}` adds one top-level field, `diagnosis`:
 
@@ -751,8 +772,13 @@ expected duration.
 8. The page `/incidents` shows a `high` diagnosis chip for the incident.
 9. Account probes: `agent_writer` can `SELECT` from `incidents` and `telemetry_events`; a zero-row
    `INSERT INTO diagnoses … SELECT … WHERE 0` is accepted; `INSERT` into `incidents`, `evidence_items`, and
-   `deployments`, `ALTER TABLE diagnoses`, `DROP TABLE diagnoses`, and `SELECT` from `system.query_log` are each
-   rejected; `dashboard_reader` cannot insert into `diagnoses`.
+   `deployments`, a live `ALTER TABLE signalforge.diagnoses_acceptance_probe ADD COLUMN …` (a table that does not exist;
+   ClickHouse answers `ACCESS_DENIED` before it looks for the table), and `SELECT` from `system.query_log` are each rejected
+   for lack of privilege (`ACCESS_DENIED`); `dashboard_reader` cannot insert into `diagnoses`. The privileged local account
+   then reads `system.grants` for `agent_writer` (`SHOW GRANTS` needs access management, which that account lacks) and asserts
+   exactly the six intended table-qualified grants, no `DROP`, `ALTER`, DDL, access-management, or `system.*` grant, no grant
+   option, and no role. There is no runtime `DROP` or `TRUNCATE` probe, and the script never issues destructive DDL against
+   a real application table.
 10. Idempotency across a restart: record the stored row count and `document` for `(incident, 1)`, run
     `docker compose restart agent-python`, wait (bounded) for the service to report healthy (the heartbeat file lives
     in a `tmpfs` that a restart empties, so healthy after a restart means a cycle completed after it), and assert the row count is still exactly 1 (counted without `FINAL`) and the `document` is

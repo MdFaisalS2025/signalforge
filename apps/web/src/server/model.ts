@@ -27,12 +27,17 @@ export interface IncidentItem {
   published_at: string | null;
 }
 
-// What an incident list item carries about its latest diagnosis. confidence is null for a failed diagnosis.
-export interface DiagnosisSummary {
-  diagnosis_version: number;
-  status: 'completed' | 'abstained' | 'failed';
-  confidence: 'low' | 'medium' | 'high' | null;
-}
+// What an incident list item carries about its latest diagnosis (spec 9.2). confidence is null for a failed diagnosis.
+// An unreadable diagnosis is { state: 'unavailable', confidence: null }, with no version, because none can be trusted.
+export type DiagnosisSummary =
+  | {
+      diagnosis_version: number;
+      state: 'completed' | 'abstained' | 'failed';
+      confidence: 'low' | 'medium' | 'high' | null;
+    }
+  | { state: 'unavailable'; confidence: null };
+
+export const UNAVAILABLE_SUMMARY: DiagnosisSummary = Object.freeze({ state: 'unavailable', confidence: null }) as DiagnosisSummary;
 
 // A list item is an incident item plus the additive diagnosis field: null when no diagnosis exists.
 export type IncidentListItem = IncidentItem & { diagnosis: DiagnosisSummary | null };
@@ -202,15 +207,16 @@ export function toEvidenceItem(row: EvidenceRow): EvidenceItem {
 const SUMMARY_CONFIDENCES = ['low', 'medium', 'high'];
 
 // toDiagnosisSummary maps a Q9 row. A row that breaks the stored-row rules (a completed or abstained diagnosis has a
-// confidence, an abstained one has "low", a failed one has none) returns null, so nothing unvalidated is shown.
-export function toDiagnosisSummary(row: DiagnosisSummaryRow): DiagnosisSummary | null {
+// confidence, an abstained one has "low", a failed one has none) is unavailable, so nothing unvalidated is shown as a
+// confidence, and no version is invented for it.
+export function toDiagnosisSummary(row: DiagnosisSummaryRow): DiagnosisSummary {
   const { diagnosis_version: version, status, confidence } = row;
-  if (!Number.isSafeInteger(version) || version < 1) return null;
+  if (!Number.isSafeInteger(version) || version < 1) return UNAVAILABLE_SUMMARY;
   if (status === 'failed') {
-    return confidence === '' ? { diagnosis_version: version, status, confidence: null } : null;
+    return confidence === '' ? { diagnosis_version: version, state: 'failed', confidence: null } : UNAVAILABLE_SUMMARY;
   }
-  if (status !== 'completed' && status !== 'abstained') return null;
-  if (!SUMMARY_CONFIDENCES.includes(confidence)) return null;
-  if (status === 'abstained' && confidence !== 'low') return null;
-  return { diagnosis_version: version, status, confidence: confidence as 'low' | 'medium' | 'high' };
+  if (status !== 'completed' && status !== 'abstained') return UNAVAILABLE_SUMMARY;
+  if (!SUMMARY_CONFIDENCES.includes(confidence)) return UNAVAILABLE_SUMMARY;
+  if (status === 'abstained' && confidence !== 'low') return UNAVAILABLE_SUMMARY;
+  return { diagnosis_version: version, state: status, confidence: confidence as 'low' | 'medium' | 'high' };
 }

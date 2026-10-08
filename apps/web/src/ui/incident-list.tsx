@@ -48,16 +48,16 @@ function StatusDot({ word, attribute, value, title }: { word: string; attribute:
   );
 }
 
-// The word for the Diagnosis column: the confidence for a completed diagnosis, else the status. Anything that does
+// The word for the Diagnosis column: the confidence for a completed diagnosis, else the state. Anything that does
 // not fit the summary shape is "unavailable", so a bad value is never shown as a confidence.
 function diagnosisWord(diagnosis: DiagnosisSummary | null | undefined): string {
   if (diagnosis === null || diagnosis === undefined) return 'pending';
-  if (diagnosis.status === 'completed') {
+  if (diagnosis.state === 'completed') {
     return diagnosis.confidence === 'high' || diagnosis.confidence === 'medium' || diagnosis.confidence === 'low'
       ? diagnosis.confidence
       : 'unavailable';
   }
-  return diagnosis.status === 'abstained' || diagnosis.status === 'failed' ? diagnosis.status : 'unavailable';
+  return diagnosis.state === 'abstained' || diagnosis.state === 'failed' ? diagnosis.state : 'unavailable';
 }
 
 function LoadedRows({ incidents }: { incidents: IncidentRowData[] }) {
