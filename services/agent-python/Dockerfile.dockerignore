@@ -1,3 +1,8 @@
 # The build context is the repository root, so send nothing except what the image copies.
 *
 !services/agent-python/requirements.txt
+!services/agent-python/src
+!contracts/events/diagnosis.schema.json
+**/__pycache__
+**/*.pyc
+**/*.pyo

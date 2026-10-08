@@ -181,11 +181,40 @@ services:
     restart: "no"
 
   agent-python:
-    image: alpine:3.20
-    command: ["sleep", "infinity"]
+    build:
+      context: ../..
+      dockerfile: services/agent-python/Dockerfile
+    environment:
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_DATABASE: signalforge
+      CLICKHOUSE_USER: agent_writer
+      CLICKHOUSE_PASSWORD: changeme-local-only
+      AGENT_PROVIDER: ${AGENT_PROVIDER:-deterministic}
+      AGENT_POLL_INTERVAL_S: ${AGENT_POLL_INTERVAL_S:-2}
+      AGENT_BATCH_SIZE: ${AGENT_BATCH_SIZE:-5}
+      AGENT_REVISION_POLICY: ${AGENT_REVISION_POLICY:-first-only}
+      AGENT_PROVIDER_BASE_URL: ${AGENT_PROVIDER_BASE_URL:-}
+      AGENT_PROVIDER_MODEL: ${AGENT_PROVIDER_MODEL:-}
+      AGENT_PROVIDER_API_KEY: ${AGENT_PROVIDER_API_KEY:-}
+      AGENT_PROVIDER_ALLOW_EXTERNAL: ${AGENT_PROVIDER_ALLOW_EXTERNAL:-no}
     depends_on:
-      - clickhouse
-      - temporal
+      clickhouse:
+        condition: service_healthy
+      collector-go:
+        condition: service_started
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-m", "signalforge_agent", "healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: "no"
 
   remediation:
     image: alpine:3.20

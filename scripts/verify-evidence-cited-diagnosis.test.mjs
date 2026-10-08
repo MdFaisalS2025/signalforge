@@ -9,6 +9,7 @@ import { test, before, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -183,5 +184,297 @@ describe('dashboard_reader and the diagnoses table (needs ClickHouse)', () => {
     const result = await asReader('INSERT INTO signalforge.diagnoses (diagnosis_id) SELECT generateUUIDv4() WHERE 0');
     assert.notEqual(result.code, 0, 'INSERT into diagnoses was accepted for the read-only account');
     assert.match(result.stderr, /READONLY|readonly/, `expected a read-only rejection, got: ${result.stderr.trim()}`);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// The agent-python Compose service (docs/specs/2026-10-07-evidence-cited-diagnosis.md, section 10).
+// The resolved-configuration and file checks below need Docker's CLI but no running stack and no ClickHouse.
+
+const COMPOSE_JSON_TIMEOUT_MS = 60_000;
+
+// Resolves the Compose file the way `docker compose up` would. AGENT_* variables are removed from the environment unless
+// a test supplies them, so the defaults are what is asserted, not whatever the developer's shell happens to export.
+async function resolvedCompose(extraEnv = {}) {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('AGENT_')));
+  const { stdout } = await execFileAsync('docker', ['compose', '-f', COMPOSE_FILE, 'config', '--format', 'json'], {
+    cwd: REPO,
+    env: { ...env, ...extraEnv },
+    timeout: COMPOSE_JSON_TIMEOUT_MS,
+    maxBuffer: 8 * 1024 * 1024,
+    windowsHide: true,
+  });
+  return JSON.parse(stdout);
+}
+
+// Compose prints durations either as nanoseconds or as text such as "5s".
+function seconds(value) {
+  if (typeof value === 'number') return value / 1e9;
+  const match = /^(\d+(?:\.\d+)?)(ms|s|m)$/.exec(String(value));
+  assert.ok(match, `unreadable duration: ${value}`);
+  return Number(match[1]) * { ms: 0.001, s: 1, m: 60 }[match[2]];
+}
+
+const samePath = (a, b) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
+
+describe('agent-python Compose service (resolved configuration)', () => {
+  let config;
+  let service;
+
+  before(async () => {
+    config = await resolvedCompose();
+    service = config.services['agent-python'];
+  }, { timeout: COMPOSE_JSON_TIMEOUT_MS + 5_000 });
+
+  test('it is built from the repository root with exactly the agent Dockerfile, not a placeholder image', () => {
+    assert.ok(service, 'the agent-python service must exist');
+    assert.ok(service.build, 'agent-python needs a build configuration');
+    assert.ok(samePath(service.build.context, REPO), `build context is ${service.build.context}, want ${REPO}`);
+    assert.equal(service.build.dockerfile, 'services/agent-python/Dockerfile');
+    assert.ok(!JSON.stringify(service).includes('alpine'), 'no alpine placeholder image');
+    assert.ok(!service.command, 'no command override: the image entrypoint runs the agent');
+    assert.ok(!service.entrypoint, 'no entrypoint override');
+  });
+
+  test('it publishes no port and exposes none', () => {
+    assert.ok(service.ports === undefined || service.ports.length === 0, `ports: ${JSON.stringify(service.ports)}`);
+    assert.ok(service.expose === undefined || service.expose.length === 0);
+  });
+
+  test('it waits for a healthy ClickHouse and a started collector-go, and never for Temporal', () => {
+    assert.deepEqual(Object.keys(service.depends_on).sort(), ['clickhouse', 'collector-go']);
+    assert.equal(service.depends_on.clickhouse.condition, 'service_healthy');
+    assert.equal(service.depends_on['collector-go'].condition, 'service_started');
+    assert.ok(!('temporal' in service.depends_on));
+  });
+
+  test('its filesystem is read-only with a writable /tmp tmpfs, and it holds no capabilities or privileges', () => {
+    assert.equal(service.read_only, true);
+    assert.deepEqual(service.tmpfs, ['/tmp']);
+    assert.deepEqual(service.cap_drop, ['ALL']);
+    assert.ok(service.security_opt.includes('no-new-privileges:true'), JSON.stringify(service.security_opt));
+    assert.ok(!service.cap_add || service.cap_add.length === 0, 'no capability may be added back');
+    for (const field of ['privileged', 'network_mode', 'pid', 'ipc', 'devices', 'volumes', 'extra_hosts', 'sysctls', 'userns_mode']) {
+      assert.ok(!service[field] || (Array.isArray(service[field]) && service[field].length === 0), `${field} must not be set`);
+    }
+  });
+
+  test('it never restarts on its own, like every service in this repository', () => {
+    assert.equal(service.restart, 'no');
+  });
+
+  test('its environment is exactly the approved set with local-only credentials and deterministic defaults', () => {
+    assert.deepEqual(service.environment, {
+      CLICKHOUSE_URL: 'http://clickhouse:8123',
+      CLICKHOUSE_DATABASE: 'signalforge',
+      CLICKHOUSE_USER: 'agent_writer',
+      CLICKHOUSE_PASSWORD: 'changeme-local-only',
+      AGENT_PROVIDER: 'deterministic',
+      AGENT_POLL_INTERVAL_S: '2',
+      AGENT_BATCH_SIZE: '5',
+      AGENT_REVISION_POLICY: 'first-only',
+      AGENT_PROVIDER_BASE_URL: '',
+      AGENT_PROVIDER_MODEL: '',
+      AGENT_PROVIDER_API_KEY: '',
+      AGENT_PROVIDER_ALLOW_EXTERNAL: 'no',
+    });
+  });
+
+  test('the provider API key resolves to the empty string by default and only a variable you set can fill it', async () => {
+    assert.equal(service.environment.AGENT_PROVIDER_API_KEY, '');
+    const supplied = (await resolvedCompose({ AGENT_PROVIDER_API_KEY: 'sentinel-supplied-by-the-caller' })).services['agent-python'];
+    assert.equal(supplied.environment.AGENT_PROVIDER_API_KEY, 'sentinel-supplied-by-the-caller');
+    assert.equal(supplied.environment.AGENT_PROVIDER, 'deterministic', 'a key alone does not switch the provider');
+  });
+
+  test('the health check runs the heartbeat command with the approved timing', () => {
+    assert.deepEqual(service.healthcheck.test, ['CMD', 'python', '-m', 'signalforge_agent', 'healthcheck']);
+    assert.equal(seconds(service.healthcheck.interval), 5);
+    assert.equal(seconds(service.healthcheck.timeout), 3);
+    assert.equal(service.healthcheck.retries, 5);
+  });
+
+  test('only the placeholder was replaced: every other service keeps its shape', () => {
+    for (const name of ['remediation', 'api', 'demo-inventory']) {
+      assert.equal(config.services[name].image, 'alpine:3.20', name);
+      assert.deepEqual(config.services[name].command, ['sleep', 'infinity'], name);
+    }
+    assert.deepEqual(
+      config.services.web.ports.map((port) => `${port.host_ip}:${port.published}->${port.target}`),
+      ['127.0.0.1:3000->3000'],
+    );
+    const mounts = config.services.clickhouse.volumes.filter((volume) => volume.type === 'bind').map((volume) => path.basename(volume.source));
+    assert.deepEqual(mounts.sort(), ['agent-writer.xml', 'dashboard-reader.xml']);
+    assert.ok(samePath(config.services['collector-go'].build.context, path.join(REPO, 'services', 'collector-go')));
+    for (const [name, other] of Object.entries(config.services)) {
+      assert.ok(!('agent-python' in (other.depends_on ?? {})), `${name} must not depend on agent-python`);
+    }
+  });
+});
+
+describe('agent-python image definition (static file checks)', () => {
+  let dockerfile;
+  let stages;
+
+  before(async () => {
+    dockerfile = await readFile(path.join(REPO, 'services', 'agent-python', 'Dockerfile'), 'utf8');
+    stages = Object.fromEntries(
+      dockerfile.split(/^FROM /m).slice(1).map((block) => [/ AS (\w+)/.exec(block.split('\n')[0])[1], 'FROM ' + block]),
+    );
+  });
+
+  const instructions = (stage) => stage.split('\n').filter((line) => /^[A-Z]+ /.test(line));
+
+  test('the pinned Python image argument and the Docker-only test stage are kept', () => {
+    assert.equal(dockerfile.match(/^ARG PYTHON_IMAGE=/gm).length, 1);
+    assert.match(dockerfile, /^ARG PYTHON_IMAGE=python:3\.12-slim@sha256:[0-9a-f]{64}$/m);
+    assert.deepEqual(Object.keys(stages), ['deps', 'runtime']);
+    assert.match(stages.deps, /^FROM \$\{PYTHON_IMAGE\} AS deps$/m);
+    assert.match(stages.deps, /COPY services\/agent-python\/requirements\.txt/);
+    assert.ok(!/signalforge_agent|ENTRYPOINT|USER /.test(stages.deps), 'the test stage has no application behavior');
+  });
+
+  test('the runtime stage starts from the same pinned image and is the last stage, so Compose builds it', () => {
+    assert.match(stages.runtime, /^FROM \$\{PYTHON_IMAGE\} AS runtime$/m);
+    assert.equal(Object.keys(stages).at(-1), 'runtime');
+  });
+
+  test('the runtime stage copies only the requirements, the agent source, and the diagnosis schema', () => {
+    const copies = instructions(stages.runtime).filter((line) => /^(COPY|ADD) /.test(line));
+    assert.deepEqual(copies.sort(), [
+      'COPY contracts/events/diagnosis.schema.json /app/contracts/events/diagnosis.schema.json',
+      'COPY services/agent-python/requirements.txt /tmp/requirements.txt',
+      'COPY services/agent-python/src /app/src',
+    ]);
+  });
+
+  test('it installs the pinned requirements, imports from /app/src, and writes no bytecode', () => {
+    assert.match(stages.runtime, /pip install -r \/tmp\/requirements\.txt/);
+    assert.match(stages.runtime, /PYTHONPATH=\/app\/src/);
+    assert.match(stages.runtime, /PYTHONDONTWRITEBYTECODE=1/);
+    assert.match(stages.runtime, /PYTHONUNBUFFERED=1/);
+  });
+
+  test('it runs as a dedicated non-root user and starts the agent through the exact entrypoint', () => {
+    assert.match(stages.runtime, /^USER 10001:10001$/m);
+    assert.ok(!/^USER (root|0)\b/m.test(stages.runtime));
+    assert.match(stages.runtime, /^ENTRYPOINT \["python", "-m", "signalforge_agent", "run"\]$/m);
+    assert.ok(!/^CMD /m.test(stages.runtime), 'no default command to append');
+  });
+
+  test('it adds no shell tools, package managers, source-control clients, or debugging utilities', () => {
+    // Every line of the stage, including lines continued after a backslash, apart from comments.
+    const body = stages.runtime.split('\n').filter((line) => !line.trim().startsWith('#')).join('\n');
+    for (const forbidden of ['apt-get', 'apt', 'apk', 'yum', 'dnf', 'curl', 'wget', 'git', 'ssh', 'gdb', 'strace', 'vim', 'nano', 'sudo', 'netcat', 'nc', 'bash', 'sh', 'busybox']) {
+      assert.ok(!new RegExp(`(^|[\\s&;|"'/])${forbidden}($|[\\s&;|"'])`).test(body), `the runtime stage must not use ${forbidden}`);
+    }
+    assert.ok(!/chmod\s+(-R\s+)?[0-7]*7[0-7]*7\b/.test(body), 'no world-writable permissions');
+  });
+
+  test('the build context allowlist admits exactly the three paths the image copies', async () => {
+    const ignore = await readFile(path.join(REPO, 'services', 'agent-python', 'Dockerfile.dockerignore'), 'utf8');
+    const patterns = ignore.split('\n').filter((line) => line.trim() && !line.startsWith('#'));
+    assert.equal(patterns[0], '*', 'everything is excluded first');
+    assert.deepEqual(patterns.filter((line) => line.startsWith('!')).sort(), [
+      '!contracts/events/diagnosis.schema.json',
+      '!services/agent-python/requirements.txt',
+      '!services/agent-python/src',
+    ]);
+    assert.ok(patterns.every((line) => line === '*' || line.startsWith('!') || /__pycache__|\.py[co]$/.test(line)), patterns.join(' | '));
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// The running container. These need the Compose stack with agent-python started and skip when it is not running.
+
+const HEALTH_DEADLINE_MS = 60_000;
+const HEALTH_POLL_MS = 2_000;
+const ALLOWED_LOG_KEYS = new Set(['level', 'message', 'incident_id', 'attempt', 'error_class']);
+const PROBE_INCIDENT_ID = '00000000-0000-4000-8000-0000000d1a60';
+
+async function compose(args, timeout = 60_000) {
+  try {
+    const { stdout, stderr } = await execFileAsync('docker', ['compose', '-f', COMPOSE_FILE, ...args], { cwd: REPO, timeout, windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
+    return { code: 0, stdout, stderr };
+  } catch (err) {
+    return { code: typeof err.code === 'number' ? err.code : 1, stdout: err.stdout ?? '', stderr: err.stderr ?? err.message };
+  }
+}
+
+describe('agent-python container (needs the running stack)', () => {
+  let containerId = '';
+
+  before(async () => {
+    containerId = (await compose(['ps', '-q', 'agent-python'])).stdout.trim();
+  });
+
+  const needsContainer = (t) => {
+    if (!containerId) {
+      t.skip('agent-python is not running; start it with `docker compose up -d --build agent-python`');
+      return false;
+    }
+    return true;
+  };
+
+  async function inspect(format) {
+    const { stdout } = await execFileAsync('docker', ['inspect', '-f', format, containerId], { timeout: 30_000, windowsHide: true });
+    return stdout.trim();
+  }
+
+  test('it becomes healthy within 60 seconds', async (t) => {
+    if (!needsContainer(t)) return;
+    const deadline = Date.now() + HEALTH_DEADLINE_MS;
+    let health = '';
+    while (Date.now() < deadline) {
+      health = await inspect('{{.State.Health.Status}}');
+      if (health === 'healthy') break;
+      await new Promise((resolve) => setTimeout(resolve, HEALTH_POLL_MS));
+    }
+    assert.equal(health, 'healthy', `agent-python was ${health} after ${HEALTH_DEADLINE_MS}ms`);
+  }, { timeout: HEALTH_DEADLINE_MS + 15_000 });
+
+  test('it publishes no host port', async (t) => {
+    if (!needsContainer(t)) return;
+    // No EXPOSE in the image and no ports in Compose, so both maps are empty.
+    assert.ok(['{}', 'null'].includes(await inspect('{{json .NetworkSettings.Ports}}')), await inspect('{{json .NetworkSettings.Ports}}'));
+    assert.ok(['{}', 'null'].includes(await inspect('{{json .HostConfig.PortBindings}}')), await inspect('{{json .HostConfig.PortBindings}}'));
+  });
+
+  test('it runs as a non-root user with a read-only filesystem, no capabilities, and no-new-privileges', async (t) => {
+    if (!needsContainer(t)) return;
+    assert.equal(await inspect('{{.Config.User}}'), '10001:10001');
+    const { stdout } = await execFileAsync('docker', ['exec', containerId, 'python', '-c', 'import os; print(os.getuid(), os.getgid())'], { timeout: 30_000, windowsHide: true });
+    assert.equal(stdout.trim(), '10001 10001');
+    assert.equal(await inspect('{{.HostConfig.ReadonlyRootfs}}'), 'true');
+    assert.equal(await inspect('{{json .HostConfig.CapDrop}}'), '["ALL"]');
+    assert.match(await inspect('{{json .HostConfig.SecurityOpt}}'), /no-new-privileges:true/);
+    assert.equal(await inspect('{{.Config.Entrypoint}}'), '[python -m signalforge_agent run]');
+  });
+
+  test('its logs are JSON objects only and leak no password, key, SQL, or Authorization text', async (t) => {
+    if (!needsContainer(t)) return;
+    const { stdout, stderr } = await compose(['logs', '--no-log-prefix', 'agent-python']);
+    const lines = `${stdout}\n${stderr}`.split('\n').filter((line) => line.trim());
+    assert.ok(lines.length > 0, 'the agent logged nothing');
+    for (const line of lines) {
+      const record = JSON.parse(line);
+      assert.ok(record && typeof record === 'object' && !Array.isArray(record), line);
+      for (const key of Object.keys(record)) assert.ok(ALLOWED_LOG_KEYS.has(key), `unexpected log key ${key}`);
+    }
+    const text = lines.join('\n');
+    for (const forbidden of [PASSWORD, 'Authorization', 'X-ClickHouse-Key', 'SELECT', 'Code:', 'INSERT', 'FORMAT JSONEachRow']) {
+      assert.ok(!text.includes(forbidden), `the logs contain ${forbidden}`);
+    }
+  });
+
+  test('it never diagnoses the retained integration probe row or anything that is not a published incident', async (t) => {
+    if (!needsContainer(t)) return;
+    const probe = await asAdmin(`SELECT count(), max(diagnosis_version) FROM signalforge.diagnoses WHERE incident_id = '${PROBE_INCIDENT_ID}' FORMAT TSV`);
+    assert.equal(probe.stdout.trim(), '1\t1', `the probe row changed: ${probe.stdout.trim()} ${probe.stderr.trim()}`);
+    const orphans = await asAdmin(
+      'SELECT count() FROM signalforge.diagnoses WHERE incident_id NOT IN (SELECT incident_id FROM signalforge.incidents) '
+        + `AND incident_id != '${PROBE_INCIDENT_ID}'`,
+    );
+    assert.equal(orphans.stdout.trim(), '0', 'a diagnosis exists for something that is not an incident');
   });
 });
