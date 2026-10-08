@@ -478,3 +478,415 @@ describe('agent-python container (needs the running stack)', () => {
     assert.equal(orphans.stdout.trim(), '0', 'a diagnosis exists for something that is not an incident');
   });
 });
+
+// ---------------------------------------------------------------------------------------------------------------
+// The acceptance script (docs/specs/2026-10-07-evidence-cited-diagnosis.md, section 12.2).
+// These need no Docker and no ClickHouse. In-process HTTP stubs stand in for the dashboard through the script's base
+// URL (DASHBOARD_BASE_URL), and the Docker-backed probes are replaced by fakes passed in the context.
+
+import http from 'node:http';
+import {
+  STEPS,
+  DIAGNOSIS_DEADLINE_MS,
+  diagnosisIdFor,
+  parseIncidentIdArg,
+  pollUntil,
+  runAcceptance,
+} from './verify-evidence-cited-diagnosis.mjs';
+
+const SAMPLE = JSON.parse(await readFile(path.join(REPO, 'contracts', 'events', 'samples', 'diagnosis.sample.json'), 'utf8'));
+const A_INCIDENT = SAMPLE.incident_id;
+const A_DEPLOYMENT = '57d9bf44-46c0-46e9-8140-4a7b9f3694a8';
+const CITED = [...new Set([
+  ...SAMPLE.supporting_claims.flatMap((claim) => claim.evidence_ids),
+  ...SAMPLE.alternative_hypotheses.flatMap((alt) => alt.disconfirming_evidence_ids),
+])];
+const NOT_EXECUTED = 'Recommendation only. Nothing was executed. Approval arrives in a later slice.';
+
+// What React writes for a text node.
+const esc = (text) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#x27;');
+const clone = (value) => JSON.parse(JSON.stringify(value));
+
+function detailPage(state) {
+  const doc = state.diagnosis;
+  const chips = (ids) => ids.map((id) => `<a class="chip" href="#evidence-${id}" title="${id}">trace ${id.slice(0, 8)}</a>`).join('');
+  const rows = state.evidence.map((row) => `<tr id="evidence-${row.evidence_id}"><td>${row.source_type}</td></tr>`).join('');
+  return `<html><body><section class="diagnosis"><h2 id="diagnosis-heading">Diagnosis</h2>`
+    + `<p class="cause-label">${state.pageCauseLabel ?? 'Likely cause'}</p><p class="cause">${esc(doc.primary_hypothesis)}</p>`
+    + `<ol class="claims">${doc.supporting_claims.map((claim) => `<li>${esc(claim.claim)}${chips(state.pageChips ?? claim.evidence_ids)}</li>`).join('')}</ol>`
+    + `<aside class="recommendation"><p>${state.pageNotice ?? NOT_EXECUTED}</p>${state.pageRecommendationExtra ?? ''}</aside>`
+    + `</section>${state.pageExtra ?? ''}<table>${state.pageRows ?? rows}</table></body></html>`;
+}
+
+function listPage(state) {
+  return `<html><body><table><tr><td><a class="mono" href="/incidents/${A_INCIDENT}">${A_INCIDENT}</a></td>`
+    + `<td><span class="status" data-diagnosis="${state.listWord ?? 'high'}"><span class="dot" aria-hidden="true"></span>${state.listWord ?? 'high'}</span></td></tr></table></body></html>`;
+}
+
+function acceptanceState() {
+  return {
+    health: [200, { status: 'ok' }],
+    evidence: CITED.map((id) => ({ evidence_id: id, source_type: 'trace', source_ref: `trace-${id.slice(0, 4)}`, reliability: 'high' })),
+    deployment: { deployment_id: A_DEPLOYMENT, new_version: '0.2.0-faulty' },
+    diagnosis: { ...clone(SAMPLE), state: 'completed' },
+    deployments: [{ deployment_id: A_DEPLOYMENT }],
+    detailCalls: 0,
+    pendingPolls: 0,
+  };
+}
+
+async function startAcceptanceStub(state) {
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url, 'http://stub');
+    const json = (status, body) => {
+      res.writeHead(status, { 'content-type': 'application/json' });
+      res.end(typeof body === 'string' ? body : JSON.stringify(body));
+    };
+    const html = (body) => {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      res.end(body);
+    };
+    if (url.pathname === '/api/health') return json(...state.health);
+    if (url.pathname === '/api/incidents') return json(200, { incidents: [{ incident_id: A_INCIDENT }] });
+    if (url.pathname === `/api/incidents/${A_INCIDENT}`) {
+      state.detailCalls += 1;
+      const pending = state.pendingPolls > 0;
+      if (pending) state.pendingPolls -= 1;
+      if (state.leak) return json(200, state.leak);
+      return json(200, {
+        incident: { incident_id: A_INCIDENT },
+        evidence: state.evidence,
+        deployment: state.deployment,
+        diagnosis: pending ? null : state.diagnosis,
+      });
+    }
+    if (url.pathname === '/api/deployments') return json(200, { deployments: state.deployments });
+    if (url.pathname === `/incidents/${A_INCIDENT}`) return html(detailPage(state));
+    if (url.pathname === '/incidents') return html(listPage(state));
+    return json(404, { error: 'nope' });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  return {
+    baseUrl: `http://127.0.0.1:${server.address().port}`,
+    close: async () => {
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    },
+  };
+}
+
+// Probes that touch Docker are fakes here. The default stored row is one row and one document, before and after.
+function fakeProbes(state, overrides = {}) {
+  const stored = { count: 1, document: JSON.stringify(SAMPLE) };
+  return {
+    accounts: async () => ({ ok: true, detail: 'fake account probes passed' }),
+    storedDiagnosis: async () => ({ ...stored }),
+    restartAgent: async () => {},
+    agentHealthy: async () => true,
+    agentLogs: async () => '{"level":"info","message":"cycle complete"}\n',
+    ...overrides,
+  };
+}
+
+async function runWith(state, { probes = {}, ...context } = {}) {
+  const stub = await startAcceptanceStub(state);
+  try {
+    return await runAcceptance({
+      baseUrl: stub.baseUrl,
+      incidentId: A_INCIDENT,
+      pollIntervalMs: 5,
+      diagnosisDeadlineMs: 2_000,
+      probes: fakeProbes(state, probes),
+      ...context,
+    });
+  } finally {
+    await stub.close();
+  }
+}
+
+describe('verify-evidence-cited-diagnosis: steps and happy path', () => {
+  test('the twelve steps are exported, numbered, and in the spec order', () => {
+    assert.deepEqual(STEPS.map((step) => step.n), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    assert.equal(new Set(STEPS.map((step) => step.id)).size, 12);
+    assert.ok(STEPS.every((step) => typeof step.name === 'string' && step.name.length > 0));
+    assert.equal(DIAGNOSIS_DEADLINE_MS, 60_000);
+  });
+
+  test('a good dashboard passes all twelve steps, each reported as it completes', async () => {
+    const seen = [];
+    const result = await runWith(acceptanceState(), { onStep: (step) => seen.push(`${step.n} ${step.status}`) });
+    assert.equal(result.ok, true, JSON.stringify(result.steps.filter((s) => s.status === 'fail')));
+    assert.equal(result.steps.length, 12);
+    assert.deepEqual(seen, STEPS.map((step) => `${step.n} pass`));
+    assert.equal(result.failed, null);
+  });
+
+  test('the diagnosis ID check uses the documented UUIDv5', () => {
+    assert.equal(diagnosisIdFor(SAMPLE.incident_id, SAMPLE.diagnosis_version), SAMPLE.diagnosis_id);
+  });
+
+  test('--incident-id is validated: only a UUID is accepted, and it is lower-cased', () => {
+    assert.equal(parseIncidentIdArg(A_INCIDENT.toUpperCase()), A_INCIDENT);
+    for (const bad of ['', 'x', `${A_INCIDENT}; rm -rf`, `../${A_INCIDENT}`, A_INCIDENT.slice(1), `${A_INCIDENT}\n`, 7]) {
+      assert.throws(() => parseIncidentIdArg(bad), /incident-id/, String(bad));
+    }
+  });
+
+  test('without --incident-id, the newest incident from the list is used', async () => {
+    const result = await runWith(acceptanceState(), { incidentId: undefined });
+    assert.equal(result.ok, true);
+  });
+
+  test('a diagnosis that appears after a few polls is waited for, not slept for', async () => {
+    const state = acceptanceState();
+    state.pendingPolls = 3;
+    const result = await runWith(state);
+    assert.equal(result.ok, true);
+    assert.ok(state.detailCalls >= 4, `expected polling, got ${state.detailCalls} detail reads`);
+  });
+
+  test('a diagnosis that never appears fails step 3 at the deadline', async () => {
+    const state = acceptanceState();
+    state.pendingPolls = Number.MAX_SAFE_INTEGER;
+    const started = Date.now();
+    const result = await runWith(state, { diagnosisDeadlineMs: 300 });
+    assert.equal(result.failed.n, 3);
+    assert.match(result.failed.detail, /deadline|within/);
+    assert.ok(Date.now() - started < 3_000);
+  });
+
+  test('an abstained, failed, or unavailable diagnosis fails step 3 by state', async () => {
+    for (const diagnosis of [{ state: 'abstained' }, { state: 'failed' }, { state: 'unavailable' }]) {
+      const state = acceptanceState();
+      state.diagnosis = diagnosis;
+      const result = await runWith(state);
+      assert.equal(result.failed.n, 3, diagnosis.state);
+    }
+  });
+
+  test('a dashboard that is down fails step 1 and stops there', async () => {
+    const state = acceptanceState();
+    state.health = [503, { error: 'clickhouse_unavailable' }];
+    const result = await runWith(state);
+    assert.equal(result.failed.n, 1);
+    assert.equal(result.steps.length, 1, 'the run stops at the first failure');
+  });
+});
+
+describe('verify-evidence-cited-diagnosis: each failure is attributed to its step', () => {
+  async function failsAt(n, mutate, context) {
+    const state = acceptanceState();
+    mutate(state);
+    const result = await runWith(state, context);
+    assert.equal(result.ok, false);
+    assert.equal(result.failed?.n, n, `expected step ${n}, got ${JSON.stringify(result.failed)}`);
+    assert.equal(result.steps.at(-1).n, n, 'no step runs after the failure');
+    return result;
+  }
+
+  test('a citation outside the incident evidence fails step 5', async () => {
+    await failsAt(5, (state) => {
+      state.diagnosis.supporting_claims[0].evidence_ids = ['ffffffff-ffff-4fff-8fff-ffffffffffff'];
+    });
+    await failsAt(5, (state) => {
+      state.diagnosis.alternative_hypotheses[0].disconfirming_evidence_ids = ['ffffffff-ffff-4fff-8fff-ffffffffffff'];
+    });
+  });
+
+  test('executable: true fails step 4', async () => {
+    await failsAt(4, (state) => {
+      state.diagnosis.remediation_recommendation.executable = true;
+    });
+  });
+
+  test('a contract violation fails step 4: version, identity, enum, bound, and extra field', async () => {
+    const mutations = [
+      (d) => { d.schema_version = '1.0'; },
+      (d) => { d.diagnosis_id = 'c03997a4-e1ef-5a94-8a2e-62d9694d7643'; },
+      (d) => { d.incident_id = 'ffffffff-ffff-4fff-8fff-ffffffffffff'; },
+      (d) => { d.confidence.value = 'certain'; },
+      (d) => { d.reasoning_summary = 'x'.repeat(1201); },
+      (d) => { d.extra = 1; },
+      (d) => { d.remediation_recommendation.requires_approval = false; },
+      (d) => { d.supporting_claims = []; },
+      (d) => { d.supporting_claims[0].kind = 'made_up'; },
+      (d) => { delete d.primary_hypothesis; },
+    ];
+    for (const mutate of mutations) await failsAt(4, (state) => mutate(state.diagnosis));
+  });
+
+  test('a hypothesis without the deployment ID, without the version, or with low confidence fails step 6', async () => {
+    await failsAt(6, (state) => {
+      state.diagnosis.primary_hypothesis = state.diagnosis.primary_hypothesis.replaceAll(A_DEPLOYMENT, 'unknown');
+    });
+    await failsAt(6, (state) => {
+      state.diagnosis.primary_hypothesis = state.diagnosis.primary_hypothesis.replaceAll('0.2.0-faulty', 'a version');
+    });
+    await failsAt(6, (state) => {
+      state.diagnosis.confidence.value = 'medium';
+    });
+  });
+
+  test('a detail page that lacks the likely cause, the notice, or its chip targets fails step 7', async () => {
+    await failsAt(7, (state) => { state.pageCauseLabel = 'Probably'; });
+    await failsAt(7, (state) => { state.pageNotice = 'It is safe.'; });
+    await failsAt(7, (state) => { state.pageChips = []; });
+    await failsAt(7, (state) => { state.pageRows = ''; });
+    await failsAt(7, (state) => { state.pageChips = ['ffffffff-ffff-4fff-8fff-ffffffffffff']; });
+  });
+
+  test('a button in the Recommendation panel, or a POST form on the page, fails step 7', async () => {
+    await failsAt(7, (state) => { state.pageRecommendationExtra = '<button type="submit">Apply</button>'; });
+    await failsAt(7, (state) => { state.pageExtra = '<form method="post" action="/x"><input></form>'; });
+    await failsAt(7, (state) => { state.pageExtra = '<form action="/x" method="POST"></form>'; });
+  });
+
+  test('a button outside the Recommendation panel, such as Refresh, is allowed', async () => {
+    const state = acceptanceState();
+    state.pageExtra = '<form method="get" action="/incidents/x"><button type="submit">Refresh</button></form>';
+    const result = await runWith(state);
+    assert.equal(result.ok, true);
+  });
+
+  test('a list page without the high diagnosis indicator fails step 8', async () => {
+    for (const word of ['pending', 'medium', 'failed', 'unavailable']) {
+      await failsAt(8, (state) => { state.listWord = word; });
+    }
+  });
+
+  test('a failed account probe fails step 9', async () => {
+    await failsAt(9, () => {}, { probes: { accounts: async () => ({ ok: false, detail: 'agent_writer could drop diagnoses' }) } });
+  });
+
+  test('a changed row count or document across the restart fails step 10', async () => {
+    const calls = { n: 0 };
+    await failsAt(10, () => {}, {
+      probes: { storedDiagnosis: async () => ({ count: (calls.n += 1) === 1 ? 1 : 2, document: JSON.stringify(SAMPLE) }) },
+    });
+    const docs = { n: 0 };
+    await failsAt(10, () => {}, {
+      probes: { storedDiagnosis: async () => ({ count: 1, document: (docs.n += 1) === 1 ? '{"a":1}' : '{"a":2}' }) },
+    });
+    await failsAt(10, () => {}, { probes: { storedDiagnosis: async () => ({ count: 0, document: '' }) } });
+  });
+
+  test('an agent that never becomes healthy after the restart fails step 10 at a bound', async () => {
+    const started = Date.now();
+    await failsAt(10, () => {}, { probes: { agentHealthy: async () => false }, healthDeadlineMs: 250 });
+    assert.ok(Date.now() - started < 3_000);
+  });
+
+  test('SELECT, Code:, the password, or Authorization in any body or log fails step 11', async () => {
+    for (const marker of ['SELECT 1', 'Code: 62', 'changeme-local-only', 'Authorization: Basic']) {
+      await failsAt(11, (state) => { state.pageExtra = `<p>${marker}</p>`; });
+    }
+    await failsAt(11, () => {}, { probes: { agentLogs: async () => '{"message":"Code: 210"}\n' } });
+    await failsAt(11, () => {}, { probes: { agentLogs: async () => 'password changeme-local-only' } });
+    await failsAt(11, () => {}, { probes: { agentLogs: async () => 'Authorization' } });
+  });
+
+  test('a leak detail names the marker class but never echoes the body', async () => {
+    const result = await failsAt(11, () => {}, { probes: { agentLogs: async () => 'Authorization: Basic c2VjcmV0' } });
+    assert.ok(!result.failed.detail.includes('c2VjcmV0'));
+    assert.ok(!result.failed.detail.includes('Basic'));
+  });
+});
+
+test('step 12: a deployment created during the restart window fails the run at step 12', async () => {
+  const state = acceptanceState();
+  const result = await runWith(state, {
+    probes: {
+      restartAgent: async () => {
+        state.deployments = [{ deployment_id: 'ffffffff-ffff-4fff-8fff-ffffffffffff' }, ...state.deployments];
+      },
+    },
+  });
+  assert.equal(result.failed?.n, 12, JSON.stringify(result.failed));
+  assert.equal(result.steps.filter((step) => step.status === 'pass').length, 11);
+});
+
+test('step 12: an unchanged deployment list passes', async () => {
+  const result = await runWith(acceptanceState());
+  assert.equal(result.steps.at(-1).n, 12);
+  assert.equal(result.steps.at(-1).status, 'pass');
+});
+
+describe('pollUntil', () => {
+  // A virtual clock: sleeping advances time instantly and records the requested delay.
+  function fakeClock() {
+    const clock = { time: 0, delays: [], now: () => clock.time };
+    clock.setTimeout = (callback, ms) => {
+      clock.delays.push(ms);
+      clock.time += ms;
+      queueMicrotask(callback);
+      return clock.delays.length;
+    };
+    clock.clearTimeout = () => {};
+    return clock;
+  }
+
+  test('it resolves on the first truthy value, without sleeping', async () => {
+    const clock = fakeClock();
+    const value = await pollUntil(async () => 'ready', { deadlineMs: 1_000, intervalMs: 100, clock });
+    assert.equal(value, 'ready');
+    assert.deepEqual(clock.delays, []);
+  });
+
+  test('it keeps polling through falsy values and resolves on the first truthy one', async () => {
+    const clock = fakeClock();
+    let calls = 0;
+    const value = await pollUntil(async () => (++calls === 4 ? { done: true } : null), { deadlineMs: 10_000, intervalMs: 100, clock });
+    assert.deepEqual(value, { done: true });
+    assert.equal(calls, 4);
+    assert.deepEqual(clock.delays, [100, 100, 100]);
+  });
+
+  test('it rejects at the deadline without running past it', async () => {
+    const clock = fakeClock();
+    let calls = 0;
+    await assert.rejects(() => pollUntil(async () => (calls += 1, false), { deadlineMs: 1_000, intervalMs: 300, clock }), /deadline/);
+    assert.ok(clock.time <= 1_000, `the clock reached ${clock.time}`);
+    assert.deepEqual(clock.delays, [300, 300, 300, 100]);
+    assert.equal(calls, 5, 'one last look exactly at the deadline');
+  });
+
+  test('it never schedules a timeout longer than intervalMs, nor longer than the time left', async () => {
+    const clock = fakeClock();
+    await assert.rejects(() => pollUntil(async () => false, { deadlineMs: 250, intervalMs: 1_000, clock }), /deadline/);
+    assert.ok(clock.delays.every((ms) => ms <= 1_000 && ms > 0), JSON.stringify(clock.delays));
+    assert.deepEqual(clock.delays, [250]);
+  });
+
+  test('it stops when cancelled, before and during a wait', async () => {
+    const before = new AbortController();
+    before.abort();
+    await assert.rejects(() => pollUntil(async () => false, { deadlineMs: 1_000, intervalMs: 10, signal: before.signal, clock: fakeClock() }), /cancel/);
+
+    const during = new AbortController();
+    let calls = 0;
+    const clock = fakeClock();
+    clock.setTimeout = (callback) => {
+      during.abort();
+      return 1;
+    };
+    await assert.rejects(
+      () => pollUntil(async () => (calls += 1, false), { deadlineMs: 1_000, intervalMs: 10, signal: during.signal, clock }),
+      /cancel/,
+    );
+    assert.equal(calls, 1);
+  });
+
+  test('a throwing check is an error, not a retry', async () => {
+    await assert.rejects(
+      () => pollUntil(async () => { throw new Error('boom'); }, { deadlineMs: 1_000, intervalMs: 10, clock: fakeClock() }),
+      /boom/,
+    );
+  });
+
+  test('with the real clock it polls at the interval and stops at the deadline', async () => {
+    const started = Date.now();
+    await assert.rejects(() => pollUntil(async () => false, { deadlineMs: 200, intervalMs: 50 }), /deadline/);
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed >= 190 && elapsed < 1_000, `elapsed ${elapsed}ms`);
+  });
+});

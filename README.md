@@ -5,11 +5,12 @@ into evidence-linked incident diagnoses and safe, human-approved remediation
 workflows.
 
 **Status: Orders → Payments observability slice, the faulty-deployment incident-correlation
-slice, and the incident dashboard implemented.** Two demo services (`demo-orders`, `demo-payments`) run in Docker Compose and
+slice, the incident dashboard, and the evidence-cited diagnosis slice implemented.** Two demo services (`demo-orders`, `demo-payments`) run in Docker Compose and
 export traces, metrics, and logs over OTLP/HTTP to the OpenTelemetry Collector. A faulty payments
 deployment now produces one persisted, evidence-linked incident (see
 [Faulty deployment incident correlation](#faulty-deployment-incident-correlation)), and a read-only
-dashboard at `http://localhost:3000` (bound to localhost only) shows it. The agent, the API, and
+dashboard at `http://localhost:3000` (bound to localhost only) shows it, together with an
+evidence-cited diagnosis (see [Evidence-cited diagnosis](#evidence-cited-diagnosis)). The API and
 remediation are still placeholder scaffolding. The overall plan is in
 [`SignalForge_Project_Plan.docx`](SignalForge_Project_Plan.docx).
 
@@ -115,7 +116,7 @@ docker compose -f infra/docker/docker-compose.yml down
 
 Running `docker compose ... up -d` without service names starts every service in the
 file. Redpanda, ClickHouse, Temporal, Prometheus, and Grafana are real images that
-the slice does not use. `agent-python`, `remediation`, `api`, and `demo-inventory` are
+the slice does not use. `remediation`, `api`, and `demo-inventory` are
 placeholder containers (`sleep infinity`).
 
 ## Endpoints
@@ -372,6 +373,45 @@ It checks health, the incident list, the newest incident's four evidence rows, t
 classification, that `POST`, `PUT`, `PATCH`, and `DELETE` are refused, that the reader account cannot write,
 that the incidents page renders, and that no response leaks SQL or driver errors. To also compare the
 evidence with known trace IDs, add `--expected-traces <id>,<id>,<id>`.
+
+## Evidence-cited diagnosis
+
+The Python agent (`agent-python`) reads each published incident and its four evidence rows from ClickHouse and
+writes one diagnosis: the likely cause, a confidence, claims that each cite evidence IDs, alternatives it considered,
+and a recommendation. A validator rejects any claim the stored evidence does not support. The diagnosis is
+**evidence-cited, non-executable, and requires later human approval**: nothing runs it, and approval arrives in a
+later slice. The design is in
+[docs/specs/2026-10-07-evidence-cited-diagnosis.md](docs/specs/2026-10-07-evidence-cited-diagnosis.md).
+
+The default is the deterministic mode. It uses a fixed rule over the stored evidence, so it needs **no provider key**,
+no network, and no external service. No external model provider is enabled in this slice.
+
+Start the full stack (the dashboard command plus `agent-python`):
+
+```bash
+docker compose -f infra/docker/docker-compose.yml up -d --build redpanda redpanda-init clickhouse otel-collector collector-go agent-python demo-orders demo-payments web
+```
+
+Then run the demo flow from [Faulty deployment dashboard](#faulty-deployment-dashboard): deploy
+`0.2.0-faulty`, send the three orders, and wait for the incident. Within about ten seconds of publication the incident
+page at `http://localhost:3000/incidents/<incident_id>` shows a **Diagnosis** card with the likely cause, a
+confidence, claims with citation chips that jump to their evidence rows, alternatives, a recommendation-only panel,
+and provenance. The incident list gains a **Diagnosis** column. Restore the healthy version and tear down as before
+(`down` without `-v`).
+
+Run the acceptance check against the running stack. It exits `0` only if all twelve checks pass, and `--incident-id`
+checks a specific incident instead of the newest:
+
+```bash
+node scripts/verify-evidence-cited-diagnosis.mjs --incident-id <incident_id>
+```
+
+It checks the diagnosis contract, that every citation belongs to the incident, the page and list rendering, the
+restricted ClickHouse accounts, that restarting `agent-python` leaves the stored diagnosis byte-identical, that
+nothing leaks, and that no remediation ran. Its restart step runs `docker compose restart agent-python`.
+
+The agent's own tests run in Docker, so no Python toolchain is needed on the host. See
+[services/agent-python/README.md](services/agent-python/README.md).
 
 ## Scope and limits
 
