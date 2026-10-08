@@ -1,0 +1,41 @@
+<?xml version="1.0"?>
+<!--
+  Least-privilege account for the diagnosis agent (docs/specs/2026-10-07-evidence-cited-diagnosis.md, section 8.5).
+  Local development only. The password is the existing local convention.
+
+  The agent reads five tables and writes exactly one: INSERT on diagnoses. It holds no DDL, delete, system,
+  access-management, or database-wide grant, so it cannot change incidents, evidence, deployments, or telemetry.
+
+  There is no <allow_databases> element on purpose. ClickHouse 24.8 refuses to start when a user has <grants>
+  together with any other access-control setting ("Any other access control settings can't be specified with
+  `grants`", BAD_ARGUMENTS), and a database allow-list without <grants> would give the account every privilege on
+  that database. The explicit table grants below already confine the account to five signalforge tables.
+-->
+<clickhouse>
+  <profiles>
+    <agent_writer_profile>
+      <readonly>0</readonly>
+      <max_execution_time>10</max_execution_time>
+      <max_rows_to_read>5000000</max_rows_to_read>
+      <max_result_rows>1000</max_result_rows>
+    </agent_writer_profile>
+  </profiles>
+  <users>
+    <agent_writer>
+      <password>changeme-local-only</password>
+      <networks>
+        <ip>::/0</ip>
+      </networks>
+      <profile>agent_writer_profile</profile>
+      <quota>default</quota>
+      <grants>
+        <query>GRANT SELECT ON signalforge.incidents</query>
+        <query>GRANT SELECT ON signalforge.evidence_items</query>
+        <query>GRANT SELECT ON signalforge.deployments</query>
+        <query>GRANT SELECT ON signalforge.telemetry_events</query>
+        <query>GRANT SELECT ON signalforge.diagnoses</query>
+        <query>GRANT INSERT ON signalforge.diagnoses</query>
+      </grants>
+    </agent_writer>
+  </users>
+</clickhouse>
