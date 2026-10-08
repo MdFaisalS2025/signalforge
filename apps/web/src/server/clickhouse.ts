@@ -1,6 +1,6 @@
 // The only dashboard module that imports @clickhouse/client. It runs the static Task 3 queries as read-only
 // requests with bound parameters. It has no write operations, no fallback credentials, and no dynamic SQL.
-import { createClient } from '@clickhouse/client';
+import { ClickHouseError, createClient } from '@clickhouse/client';
 import { QUERIES } from './queries';
 
 // Request timeout in milliseconds, from docs/specs/2026-10-06-incident-dashboard.md, section 5.1.
@@ -14,6 +14,16 @@ export class ClickHouseUnavailable extends Error {
   constructor() {
     super('ClickHouse is unavailable');
     this.name = 'ClickHouseUnavailable';
+  }
+}
+
+// The diagnosis tables could not be read although ClickHouse itself answered: the server rejected the query, for
+// example because the table does not exist yet. It is not a connectivity failure, so the rest of a response can
+// still be served. Its message is fixed and carries no SQL or driver text.
+export class DiagnosisUnavailable extends Error {
+  constructor() {
+    super('diagnosis is unavailable');
+    this.name = 'DiagnosisUnavailable';
   }
 }
 
@@ -76,6 +86,26 @@ export interface IncidentLinkRow {
   started_at: string;
 }
 
+// The latest diagnosis row for one incident (Q8). diagnosis_version is a UInt32, which JSONEachRow writes as a
+// number. failure_code and confidence are empty strings when they do not apply. document is the stored canonical
+// JSON text and is untrusted until parseDiagnosis has validated it.
+export interface DiagnosisRow {
+  diagnosis_version: number;
+  status: string;
+  confidence: string;
+  failure_code: string;
+  document: string;
+  created_at: string;
+}
+
+// One incident's latest diagnosis, without the document (Q9).
+export interface DiagnosisSummaryRow {
+  incident_id: string;
+  diagnosis_version: number;
+  status: string;
+  confidence: string;
+}
+
 // Runs one parameterized SELECT and returns its rows. The production implementation wraps the ClickHouse client;
 // tests substitute a fake.
 export interface Transport {
@@ -95,6 +125,10 @@ export interface ClickHouseReader {
   listDeployments(limit: number): Promise<RecentDeploymentRow[]>;
   failingTraces(deploymentIds: string[]): Promise<FailingTraceRow[]>;
   incidentLinks(deploymentIds: string[]): Promise<IncidentLinkRow[]>;
+  // Throws DiagnosisUnavailable when ClickHouse rejects the query, and ClickHouseUnavailable on a connectivity failure.
+  latestDiagnosis(incidentId: string): Promise<DiagnosisRow | null>;
+  // At most MAX_LIMIT IDs. An empty list returns [] without a query.
+  latestDiagnoses(incidentIds: string[]): Promise<DiagnosisSummaryRow[]>;
 }
 
 const consoleLogger: Logger = {
@@ -125,6 +159,17 @@ export function createClickHouseReader(transport: Transport, logger: Logger = co
     }
   };
 
+  // Diagnosis reads differ in one way: a server-side rejection (ClickHouseError) is DiagnosisUnavailable, so a
+  // missing diagnoses table cannot take down the incident views. Anything else is still ClickHouseUnavailable.
+  const runDiagnosis = async <T>(operation: string, sql: string, params: Record<string, unknown>): Promise<T[]> => {
+    try {
+      return await transport.select<T>(sql, params);
+    } catch (error) {
+      logger.error('clickhouse query failed', { operation, error: describe(error) });
+      throw error instanceof ClickHouseError ? new DiagnosisUnavailable() : new ClickHouseUnavailable();
+    }
+  };
+
   return {
     async listIncidents(limit) {
       return run<IncidentRow>('listIncidents', QUERIES.Q1, { limit: checkLimit(limit) });
@@ -148,6 +193,17 @@ export function createClickHouseReader(transport: Transport, logger: Logger = co
     },
     async incidentLinks(deploymentIds) {
       return run<IncidentLinkRow>('incidentLinks', QUERIES.Q7, { deployment_ids: deploymentIds });
+    },
+
+    async latestDiagnosis(incidentId) {
+      const rows = await runDiagnosis<DiagnosisRow>('latestDiagnosis', QUERIES.Q8, { incident_id: incidentId });
+      return rows[0] ?? null;
+    },
+
+    async latestDiagnoses(incidentIds) {
+      if (incidentIds.length > MAX_LIMIT) throw new RangeError(`at most ${MAX_LIMIT} incident IDs`);
+      if (incidentIds.length === 0) return [];
+      return runDiagnosis<DiagnosisSummaryRow>('latestDiagnoses', QUERIES.Q9, { incident_ids: incidentIds });
     },
   };
 }

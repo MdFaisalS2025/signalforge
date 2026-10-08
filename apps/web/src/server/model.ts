@@ -1,7 +1,7 @@
 // Pure rules and mapping for the dashboard API. No I/O, no clock, no environment, no framework types.
 // Input rows are the ClickHouse row types from clickhouse.ts. Output shapes are the API shapes in
 // docs/specs/2026-10-06-incident-dashboard.md, section 5.4.
-import type { DeploymentRow, EvidenceRow, IncidentRow, RecentDeploymentRow } from './clickhouse';
+import type { DeploymentRow, DiagnosisSummaryRow, EvidenceRow, IncidentRow, RecentDeploymentRow } from './clickhouse';
 
 export type DeploymentClass = 'healthy' | 'faulty' | 'unknown';
 
@@ -26,6 +26,16 @@ export interface IncidentItem {
   publication_state: string;
   published_at: string | null;
 }
+
+// What an incident list item carries about its latest diagnosis. confidence is null for a failed diagnosis.
+export interface DiagnosisSummary {
+  diagnosis_version: number;
+  status: 'completed' | 'abstained' | 'failed';
+  confidence: 'low' | 'medium' | 'high' | null;
+}
+
+// A list item is an incident item plus the additive diagnosis field: null when no diagnosis exists.
+export type IncidentListItem = IncidentItem & { diagnosis: DiagnosisSummary | null };
 
 export interface DeploymentItem {
   deployment_id: string;
@@ -187,4 +197,20 @@ export function toEvidenceItem(row: EvidenceRow): EvidenceItem {
     summary: row.summary,
     reliability: row.reliability,
   };
+}
+
+const SUMMARY_CONFIDENCES = ['low', 'medium', 'high'];
+
+// toDiagnosisSummary maps a Q9 row. A row that breaks the stored-row rules (a completed or abstained diagnosis has a
+// confidence, an abstained one has "low", a failed one has none) returns null, so nothing unvalidated is shown.
+export function toDiagnosisSummary(row: DiagnosisSummaryRow): DiagnosisSummary | null {
+  const { diagnosis_version: version, status, confidence } = row;
+  if (!Number.isSafeInteger(version) || version < 1) return null;
+  if (status === 'failed') {
+    return confidence === '' ? { diagnosis_version: version, status, confidence: null } : null;
+  }
+  if (status !== 'completed' && status !== 'abstained') return null;
+  if (!SUMMARY_CONFIDENCES.includes(confidence)) return null;
+  if (status === 'abstained' && confidence !== 'low') return null;
+  return { diagnosis_version: version, status, confidence: confidence as 'low' | 'medium' | 'high' };
 }

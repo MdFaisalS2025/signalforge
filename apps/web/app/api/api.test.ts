@@ -23,6 +23,8 @@ function fakeRepo(overrides: Partial<ClickHouseReader>): ClickHouseReader {
     listDeployments: unexpected,
     failingTraces: unexpected,
     incidentLinks: unexpected,
+    latestDiagnosis: async () => null,
+    latestDiagnoses: async () => [],
     ...overrides,
   };
 }
@@ -125,7 +127,7 @@ test('GET /api/incidents/{id} returns 200 with incident, explanation, deployment
   assert.equal(result.status, 200);
   assert.equal(result.headers.get('cache-control'), 'no-store');
   const body = result.json as Record<string, unknown>;
-  assert.deepEqual(Object.keys(body).sort(), ['deployment', 'evidence', 'explanation', 'generated_at', 'incident']);
+  assert.deepEqual(Object.keys(body).sort(), ['deployment', 'diagnosis', 'evidence', 'explanation', 'generated_at', 'incident']);
 });
 
 test('GET /api/deployments returns 200 with class, failing_traces, and incident_ids', async () => {

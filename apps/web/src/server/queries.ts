@@ -17,6 +17,8 @@ export interface QueryParams {
   Q5: { limit: number };
   Q6: { deployment_ids: string[] };
   Q7: { deployment_ids: string[] };
+  Q8: { incident_id: string };
+  Q9: { incident_ids: string[] };
 }
 
 export type QueryName = keyof QueryParams;
@@ -72,4 +74,20 @@ GROUP BY deployment_id`,
   Q7: `SELECT incident_id, deployment_id, started_at
 FROM incidents FINAL
 WHERE deployment_id IN {deployment_ids:Array(String)}`,
+
+  // The latest diagnosis for one incident, from docs/specs/2026-10-07-evidence-cited-diagnosis.md, section 9.1.
+  // At most one row: the highest diagnosis_version. The caller validates the document before it is shown.
+  Q8: `SELECT diagnosis_version, status, confidence, failure_code, document, created_at
+FROM diagnoses FINAL
+WHERE incident_id = {incident_id:UUID}
+ORDER BY diagnosis_version DESC
+LIMIT 1`,
+
+  // The latest diagnosis summary for each incident in a list page: one row per incident, no document. The caller
+  // passes at most 100 IDs (the incident-list cap), so the result has at most 100 rows.
+  Q9: `SELECT incident_id, diagnosis_version, status, confidence
+FROM diagnoses FINAL
+WHERE incident_id IN {incident_ids:Array(UUID)}
+ORDER BY diagnosis_version DESC
+LIMIT 1 BY incident_id`,
 } satisfies Record<QueryName, string>);

@@ -41,6 +41,16 @@ GROUP BY deployment_id`,
   Q7: `SELECT incident_id, deployment_id, started_at
 FROM incidents FINAL
 WHERE deployment_id IN {deployment_ids:Array(String)}`,
+  Q8: `SELECT diagnosis_version, status, confidence, failure_code, document, created_at
+FROM diagnoses FINAL
+WHERE incident_id = {incident_id:UUID}
+ORDER BY diagnosis_version DESC
+LIMIT 1`,
+  Q9: `SELECT incident_id, diagnosis_version, status, confidence
+FROM diagnoses FINAL
+WHERE incident_id IN {incident_ids:Array(UUID)}
+ORDER BY diagnosis_version DESC
+LIMIT 1 BY incident_id`,
 } as const;
 
 // Typed placeholders each query must declare, by name and ClickHouse type. A query with any other placeholder fails.
@@ -52,6 +62,8 @@ const PLACEHOLDERS = {
   Q5: { limit: 'UInt32' },
   Q6: { deployment_ids: 'Array(String)' },
   Q7: { deployment_ids: 'Array(String)' },
+  Q8: { incident_id: 'UUID' },
+  Q9: { incident_ids: 'Array(UUID)' },
 } as const;
 
 const normalize = (sql: string) => sql.replace(/\s+/g, ' ').trim();
@@ -74,8 +86,8 @@ test('each query matches its spec text exactly, ignoring whitespace layout', () 
   }
 });
 
-test('the seven queries are exported, and no others', () => {
-  assert.deepEqual(Object.keys(QUERIES).sort(), ['Q1', 'Q2', 'Q3', 'Q4', 'Q5', 'Q6', 'Q7']);
+test('the nine queries are exported, and no others', () => {
+  assert.deepEqual(Object.keys(QUERIES).sort(), ['Q1', 'Q2', 'Q3', 'Q4', 'Q5', 'Q6', 'Q7', 'Q8', 'Q9']);
 });
 
 test('the query map and every query string are immutable', () => {
@@ -126,7 +138,7 @@ test('the incident column list is the spec list, in order', () => {
 });
 
 test('the incident and evidence queries read the latest revision with FINAL', () => {
-  for (const name of ['Q1', 'Q2', 'Q3', 'Q4', 'Q5', 'Q6', 'Q7'] as const) {
+  for (const name of ['Q1', 'Q2', 'Q3', 'Q4', 'Q5', 'Q6', 'Q7', 'Q8', 'Q9'] as const) {
     assert.match(QUERIES[name], /FINAL/, `${name} must read with FINAL`);
   }
 });

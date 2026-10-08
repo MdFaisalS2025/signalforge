@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { ClickHouseError } from '@clickhouse/client';
 import {
   ClickHouseUnavailable,
+  DiagnosisUnavailable,
   clientOptions,
   createClickHouseReader,
   readConfig,
@@ -112,9 +114,11 @@ test('every operation sends only the static query constants, never caller text',
   await reader.listDeployments(5);
   await reader.failingTraces([DEPLOYMENT_ID]);
   await reader.incidentLinks([DEPLOYMENT_ID]);
+  await reader.latestDiagnosis(INCIDENT_ID);
+  await reader.latestDiagnoses([INCIDENT_ID]);
   const constants = new Set(Object.values(QUERIES));
   for (const call of calls) assert.ok(constants.has(call.sql), `unexpected SQL: ${call.sql}`);
-  assert.equal(calls.length, 7);
+  assert.equal(calls.length, 9);
 });
 
 test('an out-of-range limit is refused before any query is sent', async () => {
@@ -207,4 +211,80 @@ test('readConfig refuses to start when any variable is missing, and names only t
 test('readConfig does not fall back to a default account or password', () => {
   assert.throws(() => readConfig({ ...FULL_ENV, CLICKHOUSE_USER: '' }), /CLICKHOUSE_USER/);
   assert.throws(() => readConfig({ ...FULL_ENV, CLICKHOUSE_PASSWORD: '' }), /CLICKHOUSE_PASSWORD/);
+});
+
+const DIAGNOSIS_ROW = {
+  diagnosis_version: 2,
+  status: 'completed',
+  confidence: 'high',
+  failure_code: '',
+  document: '{}',
+  created_at: '2026-10-07 21:49:41.208',
+};
+
+test('latestDiagnosis sends Q8 with the incident ID and returns the one row, or null', async () => {
+  const found = fakeTransport([DIAGNOSIS_ROW]);
+  const row = await createClickHouseReader(found.transport, captureLogger().logger).latestDiagnosis(INCIDENT_ID);
+  assert.equal(found.calls.length, 1);
+  assert.equal(found.calls[0].sql, QUERIES.Q8);
+  assert.deepEqual(found.calls[0].params, { incident_id: INCIDENT_ID });
+  assert.deepEqual(row, DIAGNOSIS_ROW);
+
+  const none = fakeTransport([]);
+  assert.equal(await createClickHouseReader(none.transport, captureLogger().logger).latestDiagnosis(INCIDENT_ID), null);
+});
+
+test('latestDiagnoses sends Q9 with the ID array, and sends nothing for an empty list', async () => {
+  const summary = { incident_id: INCIDENT_ID, diagnosis_version: 2, status: 'completed', confidence: 'high' };
+  const { transport, calls } = fakeTransport([summary]);
+  const reader = createClickHouseReader(transport, captureLogger().logger);
+  assert.deepEqual(await reader.latestDiagnoses([INCIDENT_ID]), [summary]);
+  assert.equal(calls[0].sql, QUERIES.Q9);
+  assert.deepEqual(calls[0].params, { incident_ids: [INCIDENT_ID] });
+
+  assert.deepEqual(await reader.latestDiagnoses([]), []);
+  assert.equal(calls.length, 1, 'an empty list must not reach ClickHouse');
+});
+
+test('latestDiagnoses refuses more than 100 IDs before any query is sent', async () => {
+  const { transport, calls } = fakeTransport([]);
+  const reader = createClickHouseReader(transport, captureLogger().logger);
+  await assert.rejects(() => reader.latestDiagnoses(Array(101).fill(INCIDENT_ID)), RangeError);
+  assert.equal(calls.length, 0);
+  await reader.latestDiagnoses(Array(100).fill(INCIDENT_ID));
+  assert.equal(calls.length, 1);
+});
+
+test('a ClickHouse rejection of a diagnosis query is DiagnosisUnavailable, not ClickHouseUnavailable', async () => {
+  const missingTable = new ClickHouseError({ message: 'Table signalforge.diagnoses does not exist', code: '60', type: 'UNKNOWN_TABLE' });
+  for (const call of [
+    (r: ReturnType<typeof createClickHouseReader>) => r.latestDiagnosis(INCIDENT_ID),
+    (r: ReturnType<typeof createClickHouseReader>) => r.latestDiagnoses([INCIDENT_ID]),
+  ]) {
+    const { transport } = fakeTransport([], missingTable);
+    const { logger, errors } = captureLogger();
+    await assert.rejects(
+      () => call(createClickHouseReader(transport, logger)),
+      (error: unknown) => {
+        assert.ok(error instanceof DiagnosisUnavailable);
+        assert.ok(!(error instanceof ClickHouseUnavailable));
+        assert.ok(!error.message.includes('diagnoses'), 'the public error must not name tables');
+        return true;
+      },
+    );
+    assert.equal(errors.length, 1);
+  }
+});
+
+test('a connectivity failure on a diagnosis query is still ClickHouseUnavailable', async () => {
+  const { transport } = fakeTransport([], new Error('connect ECONNREFUSED 127.0.0.1:8123'));
+  const reader = createClickHouseReader(transport, captureLogger().logger);
+  await assert.rejects(() => reader.latestDiagnosis(INCIDENT_ID), ClickHouseUnavailable);
+  await assert.rejects(() => reader.latestDiagnoses([INCIDENT_ID]), ClickHouseUnavailable);
+});
+
+test('a ClickHouse rejection on an existing incident query is still ClickHouseUnavailable', async () => {
+  const rejected = new ClickHouseError({ message: 'Table does not exist', code: '60', type: 'UNKNOWN_TABLE' });
+  const { transport } = fakeTransport([], rejected);
+  await assert.rejects(() => createClickHouseReader(transport, captureLogger().logger).getIncident(INCIDENT_ID), ClickHouseUnavailable);
 });

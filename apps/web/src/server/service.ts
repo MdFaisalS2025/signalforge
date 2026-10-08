@@ -2,16 +2,20 @@
 // mappings. It has no writes, no dynamic SQL, and no fallback data. The HTTP helpers at the end turn its outcomes
 // into responses, so every route shares one error mapping.
 import { ClickHouseUnavailable, createClickHouseReaderFromEnv, type ClickHouseReader } from './clickhouse';
+import { parseDiagnosis, UNAVAILABLE, type DiagnosisPayload } from './diagnosis';
 import {
   explainIncident,
   toDeploymentDetail,
   toDeploymentItem,
+  toDiagnosisSummary,
   toEvidenceItem,
   toIncidentItem,
   type DeploymentDetail,
   type DeploymentItem,
+  type DiagnosisSummary,
   type EvidenceItem,
   type IncidentItem,
+  type IncidentListItem,
 } from './model';
 import { InvalidInput, parseIncidentId, parseLimit } from './validate';
 
@@ -24,13 +28,14 @@ export class IncidentNotFound extends Error {
 }
 
 export interface DashboardService {
-  listIncidents(rawLimit: unknown): Promise<{ generated_at: string; incidents: IncidentItem[] }>;
+  listIncidents(rawLimit: unknown): Promise<{ generated_at: string; incidents: IncidentListItem[] }>;
   getIncidentDetail(rawIncidentId: unknown): Promise<{
     generated_at: string;
     incident: IncidentItem;
     explanation: string;
     deployment: DeploymentDetail | null;
     evidence: EvidenceItem[];
+    diagnosis: DiagnosisPayload | null;
   }>;
   listDeployments(rawLimit: unknown): Promise<{ generated_at: string; deployments: DeploymentItem[] }>;
 }
@@ -38,6 +43,8 @@ export interface DashboardService {
 export interface ServiceDeps {
   repo: ClickHouseReader;
   now: () => Date;
+  // Receives one structured entry when the diagnosis cannot be shown. Defaults to a JSON line on stderr.
+  log?: (entry: Record<string, unknown>) => void;
 }
 
 // Failure counts come back from ClickHouse as quoted 64-bit integers. Anything other than digits is an error.
@@ -46,8 +53,24 @@ function parseCount(value: string): number {
   return Number(value);
 }
 
-export function createDashboardService({ repo, now }: ServiceDeps): DashboardService {
+const consoleLog = (entry: Record<string, unknown>) => console.error(JSON.stringify(entry));
+
+export function createDashboardService({ repo, now, log = consoleLog }: ServiceDeps): DashboardService {
   const generatedAt = () => now().toISOString();
+
+  // A diagnosis read may fail without taking the rest of the response with it. A lost connection is still a 503,
+  // as for every other read. Any other failure is logged by class only (never the message, which can hold SQL or
+  // document text) and the caller shows the diagnosis as unavailable.
+  async function diagnosisOr<T>(operation: string, read: () => Promise<T>, fallback: T): Promise<T> {
+    try {
+      return await read();
+    } catch (error) {
+      if (error instanceof ClickHouseUnavailable) throw error;
+      const errorClass = error instanceof Error ? error.name : 'unknown';
+      log({ level: 'error', message: 'diagnosis unavailable', operation, error_class: errorClass });
+      return fallback;
+    }
+  }
 
   // Looks up each distinct deployment once. A missing deployment maps to a null version.
   async function deploymentVersions(deploymentIds: string[]): Promise<Map<string, string | null>> {
@@ -64,8 +87,20 @@ export function createDashboardService({ repo, now }: ServiceDeps): DashboardSer
       const limit = parseLimit(rawLimit, { fallback: 20, max: 100 });
       const rows = await repo.listIncidents(limit);
       const versions = await deploymentVersions(rows.map((row) => row.deployment_id));
+      const summaries = new Map<string, DiagnosisSummary>();
+      const summaryRows =
+        rows.length === 0
+          ? []
+          : await diagnosisOr('listIncidents', () => repo.latestDiagnoses(rows.map((row) => row.incident_id)), []);
+      for (const summaryRow of summaryRows) {
+        const summary = toDiagnosisSummary(summaryRow);
+        if (summary !== null) summaries.set(summaryRow.incident_id, summary);
+      }
       const incidents = rows
-        .map((row) => toIncidentItem(row, versions.get(row.deployment_id) ?? null))
+        .map((row): IncidentListItem => ({
+          ...toIncidentItem(row, versions.get(row.deployment_id) ?? null),
+          diagnosis: summaries.get(row.incident_id) ?? null,
+        }))
         // Fixed-width UTC text, so a plain string comparison orders by time, newest first.
         .sort((a, b) => (a.detected_at < b.detected_at ? 1 : a.detected_at > b.detected_at ? -1 : 0));
       return { generated_at: generatedAt(), incidents };
@@ -80,6 +115,17 @@ export function createDashboardService({ repo, now }: ServiceDeps): DashboardSer
       const deploymentVersion = deploymentRow?.new_version ?? null;
       const incident = toIncidentItem(row, deploymentVersion);
       const evidence = (await repo.listEvidence(incidentId)).map(toEvidenceItem);
+      // Validated against this response's own evidence, so a citation can never point outside what is shown.
+      const diagnosis = await diagnosisOr<DiagnosisPayload | null>(
+        'getIncidentDetail',
+        async () => {
+          const stored = await repo.latestDiagnosis(incidentId);
+          return stored === null
+            ? null
+            : parseDiagnosis(stored, incidentId, evidence.map((item) => item.evidence_id));
+        },
+        UNAVAILABLE,
+      );
 
       return {
         generated_at: generatedAt(),
@@ -92,6 +138,7 @@ export function createDashboardService({ repo, now }: ServiceDeps): DashboardSer
         }),
         deployment: deploymentRow === null ? null : toDeploymentDetail(deploymentRow),
         evidence,
+        diagnosis,
       };
     },
 

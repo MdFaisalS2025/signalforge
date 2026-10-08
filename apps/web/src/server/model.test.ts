@@ -6,6 +6,7 @@ import {
   toDeploymentDetail,
   toDeploymentItem,
   toEvidenceItem,
+  toDiagnosisSummary,
   toIncidentItem,
 } from './model';
 import type { DeploymentRow, EvidenceRow, IncidentRow, RecentDeploymentRow } from './clickhouse';
@@ -282,3 +283,37 @@ function evidenceFixture(): EvidenceRow {
     reliability: 'high',
   };
 }
+
+test('toDiagnosisSummary exposes only the version, the status, and the confidence', () => {
+  assert.deepEqual(
+    toDiagnosisSummary({ incident_id: INCIDENT_ID, diagnosis_version: 2, status: 'completed', confidence: 'high' }),
+    { diagnosis_version: 2, status: 'completed', confidence: 'high' },
+  );
+  assert.deepEqual(
+    toDiagnosisSummary({ incident_id: INCIDENT_ID, diagnosis_version: 1, status: 'abstained', confidence: 'low' }),
+    { diagnosis_version: 1, status: 'abstained', confidence: 'low' },
+  );
+});
+
+test('toDiagnosisSummary reports a failed diagnosis with a null confidence', () => {
+  assert.deepEqual(
+    toDiagnosisSummary({ incident_id: INCIDENT_ID, diagnosis_version: 3, status: 'failed', confidence: '' }),
+    { diagnosis_version: 3, status: 'failed', confidence: null },
+  );
+});
+
+test('toDiagnosisSummary returns null for any row that is not a valid summary', () => {
+  const bad = [
+    { diagnosis_version: 0, status: 'completed', confidence: 'high' },
+    { diagnosis_version: 1.5, status: 'completed', confidence: 'high' },
+    { diagnosis_version: '1', status: 'completed', confidence: 'high' },
+    { diagnosis_version: 1, status: 'bogus', confidence: 'high' },
+    { diagnosis_version: 1, status: 'completed', confidence: 'certain' },
+    { diagnosis_version: 1, status: 'completed', confidence: '' },
+    { diagnosis_version: 1, status: 'abstained', confidence: 'high' },
+    { diagnosis_version: 1, status: 'failed', confidence: 'low' },
+  ];
+  for (const row of bad) {
+    assert.equal(toDiagnosisSummary({ incident_id: INCIDENT_ID, ...row } as never), null, JSON.stringify(row));
+  }
+});

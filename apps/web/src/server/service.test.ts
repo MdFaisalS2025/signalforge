@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createDashboardService, IncidentNotFound } from './service';
-import { ClickHouseUnavailable, type ClickHouseReader, type DeploymentRow, type IncidentRow } from './clickhouse';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { ClickHouseUnavailable, DiagnosisUnavailable, type ClickHouseReader, type DiagnosisRow, type DeploymentRow, type IncidentRow } from './clickhouse';
 import { InvalidInput } from './validate';
 
 const FIXED_NOW = new Date('2026-10-06T14:05:00.000Z');
@@ -23,6 +25,8 @@ function fakeRepo(overrides: Partial<ClickHouseReader> = {}): ClickHouseReader {
     listDeployments: unexpected,
     failingTraces: unexpected,
     incidentLinks: unexpected,
+    latestDiagnosis: async () => null,
+    latestDiagnoses: async () => [],
     ...overrides,
   };
 }
@@ -172,7 +176,7 @@ test('getIncidentDetail returns incident, explanation, deployment, and evidence'
     }),
   ).getIncidentDetail(INCIDENT_A);
 
-  assert.deepEqual(Object.keys(result).sort(), ['deployment', 'evidence', 'explanation', 'generated_at', 'incident']);
+  assert.deepEqual(Object.keys(result).sort(), ['deployment', 'diagnosis', 'evidence', 'explanation', 'generated_at', 'incident']);
   assert.equal(result.incident.incident_id, INCIDENT_A);
   assert.equal(result.incident.deployment_version, '0.2.0-faulty');
   assert.equal(result.deployment?.new_version, '0.2.0-faulty');
@@ -310,4 +314,220 @@ test('an unavailable ClickHouse surfaces unchanged so the route can map it', asy
     () => service(fakeRepo({ listIncidents: async () => { throw new ClickHouseUnavailable(); } })).listIncidents(undefined),
     ClickHouseUnavailable,
   );
+});
+
+// ---- the latest diagnosis, additively ----
+
+const SAMPLE = JSON.parse(
+  readFileSync(join(__dirname, '..', '..', '..', '..', 'contracts', 'events', 'samples', 'diagnosis.sample.json'), 'utf-8'),
+) as Record<string, any>;
+const SAMPLE_INCIDENT = SAMPLE.incident_id as string;
+const CITED = [
+  ...new Set<string>([
+    ...SAMPLE.supporting_claims.flatMap((c: any) => c.evidence_ids),
+    ...SAMPLE.alternative_hypotheses.flatMap((a: any) => a.disconfirming_evidence_ids),
+  ]),
+];
+
+const sampleEvidenceRows = () =>
+  CITED.map((id) => ({
+    evidence_id: id,
+    source_type: 'trace',
+    source_ref: 'trace-1',
+    timestamp: '2026-10-03 12:00:06.000000000',
+    service: 'demo-payments',
+    summary: 'a failing request',
+    reliability: 'high',
+  }));
+
+const sampleDiagnosisRow = (overrides: Partial<DiagnosisRow> = {}): DiagnosisRow => ({
+  diagnosis_version: 1,
+  status: 'completed',
+  confidence: 'high',
+  failure_code: '',
+  document: JSON.stringify(SAMPLE),
+  created_at: '2026-10-07 21:49:41.208',
+  ...overrides,
+});
+
+function detailRepo(overrides: Partial<ClickHouseReader> = {}) {
+  return fakeRepo({
+    getIncident: async () => incidentRow({ incident_id: SAMPLE_INCIDENT }),
+    getDeployment: async () => deploymentRow(),
+    listEvidence: async () => sampleEvidenceRows(),
+    ...overrides,
+  });
+}
+
+function loggedService(repo: ClickHouseReader) {
+  const logs: Array<Record<string, unknown>> = [];
+  return { logs, svc: createDashboardService({ repo, now: () => FIXED_NOW, log: (entry) => logs.push(entry) }) };
+}
+
+test('detail diagnosis is null when the incident has no diagnosis row', async () => {
+  const result = await service(detailRepo({ latestDiagnosis: async () => null })).getIncidentDetail(SAMPLE_INCIDENT);
+  assert.equal(result.diagnosis, null);
+});
+
+test('detail diagnosis is the validated document plus state when it is completed', async () => {
+  const result = await service(detailRepo({ latestDiagnosis: async () => sampleDiagnosisRow() })).getIncidentDetail(SAMPLE_INCIDENT);
+  assert.deepEqual(result.diagnosis, { ...SAMPLE, state: 'completed' });
+});
+
+test('detail diagnosis for a failed row is only the approved failed shape', async () => {
+  const row = sampleDiagnosisRow({ diagnosis_version: 2, status: 'failed', confidence: '', failure_code: 'bundle_too_large', document: '' });
+  const result = await service(detailRepo({ latestDiagnosis: async () => row })).getIncidentDetail(SAMPLE_INCIDENT);
+  assert.deepEqual(result.diagnosis, {
+    state: 'failed',
+    diagnosis_version: 2,
+    failure_code: 'bundle_too_large',
+    created_at: '2026-10-07T21:49:41.208Z',
+  });
+});
+
+test('detail diagnosis is unavailable when a citation is not in the same response evidence', async () => {
+  const result = await service(
+    detailRepo({ listEvidence: async () => sampleEvidenceRows().slice(1), latestDiagnosis: async () => sampleDiagnosisRow() }),
+  ).getIncidentDetail(SAMPLE_INCIDENT);
+  assert.deepEqual(result.diagnosis, { state: 'unavailable' });
+  assert.equal(result.evidence.length, CITED.length - 1, 'the rest of the response is unchanged');
+});
+
+test('detail diagnosis is unavailable when the stored document belongs to another incident', async () => {
+  const doc = { ...SAMPLE, incident_id: INCIDENT_B };
+  const result = await service(
+    detailRepo({ latestDiagnosis: async () => sampleDiagnosisRow({ document: JSON.stringify(doc) }) }),
+  ).getIncidentDetail(SAMPLE_INCIDENT);
+  assert.deepEqual(result.diagnosis, { state: 'unavailable' });
+});
+
+test('a diagnosis query rejection degrades only the diagnosis, and is logged without detail', async () => {
+  const { svc, logs } = loggedService(
+    detailRepo({
+      latestDiagnosis: async () => {
+        throw new DiagnosisUnavailable();
+      },
+    }),
+  );
+  const result = await svc.getIncidentDetail(SAMPLE_INCIDENT);
+  assert.deepEqual(result.diagnosis, { state: 'unavailable' });
+  assert.equal(result.incident.incident_id, SAMPLE_INCIDENT);
+  assert.equal(result.evidence.length, CITED.length);
+  assert.deepEqual(logs, [
+    { level: 'error', message: 'diagnosis unavailable', operation: 'getIncidentDetail', error_class: 'DiagnosisUnavailable' },
+  ]);
+});
+
+test('any non-connectivity error from the diagnosis read degrades to unavailable', async () => {
+  const result = await service(
+    detailRepo({
+      latestDiagnosis: async () => {
+        throw new TypeError('boom');
+      },
+    }),
+  ).getIncidentDetail(SAMPLE_INCIDENT);
+  assert.deepEqual(result.diagnosis, { state: 'unavailable' });
+});
+
+test('ClickHouseUnavailable from a diagnosis read still fails the request', async () => {
+  await assert.rejects(
+    () =>
+      service(
+        detailRepo({
+          latestDiagnosis: async () => {
+            throw new ClickHouseUnavailable();
+          },
+        }),
+      ).getIncidentDetail(SAMPLE_INCIDENT),
+    ClickHouseUnavailable,
+  );
+  await assert.rejects(
+    () =>
+      service(
+        fakeRepo({
+          listIncidents: async () => [incidentRow()],
+          getDeployment: async () => deploymentRow(),
+          latestDiagnoses: async () => {
+            throw new ClickHouseUnavailable();
+          },
+        }),
+      ).listIncidents(undefined),
+    ClickHouseUnavailable,
+  );
+});
+
+test('list items gain a diagnosis summary, null when the incident has none', async () => {
+  let asked: string[] = [];
+  const result = await service(
+    fakeRepo({
+      listIncidents: async () => [incidentRow({ incident_id: INCIDENT_A }), incidentRow({ incident_id: INCIDENT_B })],
+      getDeployment: async () => deploymentRow(),
+      latestDiagnoses: async (ids) => {
+        asked = ids;
+        return [{ incident_id: INCIDENT_B, diagnosis_version: 2, status: 'abstained', confidence: 'low' }];
+      },
+    }),
+  ).listIncidents(undefined);
+  assert.deepEqual([...asked].sort(), [INCIDENT_A, INCIDENT_B].sort());
+  const byId = new Map(result.incidents.map((i) => [i.incident_id, i]));
+  assert.equal(byId.get(INCIDENT_A)?.diagnosis, null);
+  assert.deepEqual(byId.get(INCIDENT_B)?.diagnosis, { diagnosis_version: 2, status: 'abstained', confidence: 'low' });
+  assert.equal(byId.get(INCIDENT_A)?.deployment_version, '0.2.0-faulty', 'existing fields are unchanged');
+});
+
+test('list diagnosis degrades to null for every item when the summary read is rejected', async () => {
+  const { svc, logs } = loggedService(
+    fakeRepo({
+      listIncidents: async () => [incidentRow()],
+      getDeployment: async () => deploymentRow(),
+      latestDiagnoses: async () => {
+        throw new DiagnosisUnavailable();
+      },
+    }),
+  );
+  const result = await svc.listIncidents(undefined);
+  assert.equal(result.incidents.length, 1);
+  assert.equal(result.incidents[0].diagnosis, null);
+  assert.equal(logs.length, 1);
+});
+
+test('an invalid summary row is dropped rather than shown, and an empty list asks nothing', async () => {
+  const result = await service(
+    fakeRepo({
+      listIncidents: async () => [incidentRow()],
+      getDeployment: async () => deploymentRow(),
+      latestDiagnoses: async () => [{ incident_id: INCIDENT_A, diagnosis_version: 1, status: 'completed', confidence: 'certain' }],
+    }),
+  ).listIncidents(undefined);
+  assert.equal(result.incidents[0].diagnosis, null);
+
+  let calls = 0;
+  const empty = await service(
+    fakeRepo({
+      listIncidents: async () => [],
+      latestDiagnoses: async () => {
+        calls += 1;
+        return [];
+      },
+    }),
+  ).listIncidents(undefined);
+  assert.deepEqual(empty.incidents, []);
+  assert.equal(calls, 0);
+});
+
+test('a malformed incident ID never reaches the diagnosis read', async () => {
+  let called = false;
+  await assert.rejects(
+    () =>
+      service(
+        fakeRepo({
+          latestDiagnosis: async () => {
+            called = true;
+            return null;
+          },
+        }),
+      ).getIncidentDetail('not-a-uuid'),
+    InvalidInput,
+  );
+  assert.equal(called, false);
 });
