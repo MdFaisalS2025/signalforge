@@ -384,6 +384,178 @@ td a + a {
   white-space: pre;
 }
 
+/* Diagnosis. Same surface, hairline, and type scale as the panels above. Likely cause and confidence lead; citation
+   chips are small, muted, and monospace so they stay secondary but easy to follow. Status always carries a word. */
+.diagnosis {
+  margin: 20px 0 0;
+}
+
+.diagnosis h2 {
+  margin-top: 0;
+}
+
+.diagnosis-body {
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  overflow-wrap: anywhere;
+}
+
+.diagnosis-body h3 {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted);
+  margin: 14px 0 4px;
+}
+
+.diagnosis-body p {
+  margin: 0 0 6px;
+}
+
+.cause-label {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.cause {
+  font-weight: 600;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.confidence {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+  margin: 0 0 2px;
+}
+
+.confidence .status {
+  font-weight: 600;
+}
+
+.confidence-explanation {
+  color: var(--muted);
+}
+
+.status[data-confidence="high"] .dot,
+.status[data-diagnosis="high"] .dot {
+  background: var(--healthy);
+}
+
+.status[data-confidence="medium"] .dot,
+.status[data-diagnosis="medium"] .dot {
+  background: var(--high);
+}
+
+.claims,
+.alternatives,
+.missing {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.claims li,
+.alternatives li,
+.missing li {
+  margin: 0 0 6px;
+}
+
+.chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-left: 6px;
+  vertical-align: baseline;
+}
+
+.chip {
+  display: inline-block;
+  padding: 0 6px;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 18px;
+  color: var(--muted);
+  text-decoration: none;
+  background: var(--bg);
+  border: 1px solid var(--hairline);
+  border-radius: 3px;
+}
+
+.chip:hover {
+  color: var(--text);
+  text-decoration: underline;
+}
+
+.argued-against {
+  margin-left: 6px;
+  color: var(--muted);
+}
+
+.recommendation {
+  margin: 14px 0 0;
+  padding: 8px 12px;
+  border: 1px solid var(--hairline);
+  border-left: 3px solid var(--muted);
+  border-radius: 4px;
+  background: var(--bg);
+}
+
+.recommendation h3 {
+  margin-top: 0;
+}
+
+.recommendation-notice {
+  font-weight: 600;
+}
+
+.recommendation dl,
+.provenance {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 2px 16px;
+  margin: 0;
+}
+
+.recommendation dt,
+.provenance dt {
+  color: var(--muted);
+}
+
+.recommendation dd,
+.provenance dd {
+  margin: 0;
+}
+
+.provenance {
+  margin-top: 14px;
+  padding-top: 8px;
+  border-top: 1px solid var(--hairline);
+  font-size: 12px;
+}
+
+/* A citation chip jumps to its evidence row. The targeted row is marked with the focus bar. */
+tr:target {
+  background: var(--bg);
+  box-shadow: inset 3px 0 0 var(--focus);
+}
+
+@media (max-width: 599px) {
+  .recommendation dl,
+  .provenance {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .recommendation dd,
+  .provenance dd {
+    margin-bottom: 4px;
+  }
+}
+
 /* Below 960px the rail becomes a top bar with the three sections inline. */
 @media (max-width: 959px) {
   .shell {

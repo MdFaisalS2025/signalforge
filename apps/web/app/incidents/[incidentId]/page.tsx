@@ -1,4 +1,5 @@
 import { notFound } from 'next/navigation';
+import { DiagnosisCard } from '../../../src/ui/diagnosis-card';
 import { EvidenceTimeline } from '../../../src/ui/evidence-timeline';
 import { Shell } from '../../../src/ui/shell';
 import { ClickHouseUnavailable } from '../../../src/server/clickhouse';
@@ -40,7 +41,7 @@ export default async function IncidentDetailPage({ params }: { params: Promise<{
     );
   }
 
-  const { incident, explanation, deployment, evidence } = detail;
+  const { incident, explanation, deployment, evidence, diagnosis } = detail;
   return (
     <Shell current="incidents">
       <section className="detail">
@@ -56,6 +57,8 @@ export default async function IncidentDetailPage({ params }: { params: Promise<{
         </p>
 
         <p className="explanation">{explanation}</p>
+
+        <DiagnosisCard incidentId={incident.incident_id} diagnosis={diagnosis} evidence={evidence} />
 
         <h2>Deployment</h2>
         {deployment === null ? (
@@ -101,7 +104,7 @@ export default async function IncidentDetailPage({ params }: { params: Promise<{
             </thead>
             <tbody>
               {evidence.map((row) => (
-                <tr key={row.evidence_id}>
+                <tr key={row.evidence_id} id={`evidence-${row.evidence_id}`}>
                   <td>{row.source_type}</td>
                   <td className="mono">{row.source_ref}</td>
                   <td className="mono">{row.timestamp}</td>

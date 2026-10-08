@@ -133,3 +133,59 @@ test('a pending incident has no publication tooltip and invents no published tim
   assert.doesNotMatch(tag, /title=/);
   assert.doesNotMatch(markup, /Published|published at/i);
 });
+
+// ---- the Diagnosis column ----
+
+function diagnosisCell(markup: string): string {
+  const headers = [...markup.matchAll(/<th scope="col">([^<]*)<\/th>/g)].map((m) => m[1]);
+  assert.deepEqual(headers.slice(-2), ['Publication', 'Diagnosis'], 'Diagnosis must follow Publication');
+  const row = /<tbody>[\s\S]*?<tr[^>]*>([\s\S]*?)<\/tr>/.exec(markup)?.[1] ?? '';
+  const cells = [...row.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map((m) => m[1]);
+  assert.equal(cells.length, headers.length);
+  return cells[cells.length - 1];
+}
+
+test('the list shows confidence as a dot plus its word for a completed diagnosis', () => {
+  for (const level of ['high', 'medium', 'low'] as const) {
+    const markup = render({
+      kind: 'loaded',
+      incidents: [incident({ diagnosis: { diagnosis_version: 1, status: 'completed', confidence: level } } as never)],
+    });
+    const cell = diagnosisCell(markup);
+    assert.match(cell, new RegExp(`data-diagnosis="${level}"`));
+    assert.match(cell, /<span class="dot" aria-hidden="true"><\/span>/);
+    assert.ok(cell.endsWith(`</span>${level}</span>`), cell);
+  }
+});
+
+test('the list shows abstained, failed, pending, and unavailable as words', () => {
+  const cases: Array<[unknown, string]> = [
+    [{ diagnosis_version: 1, status: 'abstained', confidence: 'low' }, 'abstained'],
+    [{ diagnosis_version: 1, status: 'failed', confidence: null }, 'failed'],
+    [null, 'pending'],
+    [undefined, 'pending'],
+    [{ diagnosis_version: 1, status: 'surprising', confidence: null }, 'unavailable'],
+    [{ diagnosis_version: 1, status: 'completed', confidence: null }, 'unavailable'],
+  ];
+  for (const [diagnosis, word] of cases) {
+    const markup = render({ kind: 'loaded', incidents: [incident({ diagnosis } as never)] });
+    const cell = diagnosisCell(markup);
+    assert.match(cell, new RegExp(`data-diagnosis="${word}"`), word);
+    assert.ok(cell.endsWith(`</span>${word}</span>`), cell);
+  }
+});
+
+test('the Diagnosis cell is text only, and the only link in a row is the incident link', () => {
+  const markup = render({
+    kind: 'loaded',
+    incidents: [incident({ diagnosis: { diagnosis_version: 1, status: 'completed', confidence: 'high' } } as never)],
+  });
+  assert.ok(!diagnosisCell(markup).includes('<a'));
+  assert.equal(count(markup, '<a '), 1);
+});
+
+test('the loading skeleton has a cell for every column, including Diagnosis', () => {
+  const markup = render({ kind: 'loading' });
+  const row = /<tr data-skeleton-row[^>]*>([\s\S]*?)<\/tr>/.exec(markup)?.[1] ?? '';
+  assert.equal(count(row, '<td>'), 8);
+});

@@ -3,13 +3,16 @@
 // The incident list. It renders one of four explicit states from props, so each state is testable on its own.
 // The only client-side work is setting the detected-time title to the viewer's local time. It stores no state.
 import { useEffect, useRef } from 'react';
-import type { IncidentItem } from '../server/model';
+import type { DiagnosisSummary, IncidentItem } from '../server/model';
+
+// A list item may carry the additive diagnosis summary. An item without one is shown as pending.
+export type IncidentRowData = IncidentItem & { diagnosis?: DiagnosisSummary | null };
 
 export type IncidentListState =
   | { kind: 'loading' }
   | { kind: 'empty' }
   | { kind: 'error' }
-  | { kind: 'loaded'; incidents: IncidentItem[] };
+  | { kind: 'loaded'; incidents: IncidentRowData[] };
 
 // Refresh is a plain GET form, so it works without JavaScript and keeps no client state.
 function RefreshForm() {
@@ -45,7 +48,19 @@ function StatusDot({ word, attribute, value, title }: { word: string; attribute:
   );
 }
 
-function LoadedRows({ incidents }: { incidents: IncidentItem[] }) {
+// The word for the Diagnosis column: the confidence for a completed diagnosis, else the status. Anything that does
+// not fit the summary shape is "unavailable", so a bad value is never shown as a confidence.
+function diagnosisWord(diagnosis: DiagnosisSummary | null | undefined): string {
+  if (diagnosis === null || diagnosis === undefined) return 'pending';
+  if (diagnosis.status === 'completed') {
+    return diagnosis.confidence === 'high' || diagnosis.confidence === 'medium' || diagnosis.confidence === 'low'
+      ? diagnosis.confidence
+      : 'unavailable';
+  }
+  return diagnosis.status === 'abstained' || diagnosis.status === 'failed' ? diagnosis.status : 'unavailable';
+}
+
+function LoadedRows({ incidents }: { incidents: IncidentRowData[] }) {
   return (
     <>
       {incidents.map((incident) => (
@@ -76,6 +91,9 @@ function LoadedRows({ incidents }: { incidents: IncidentItem[] }) {
               title={incident.published_at === null ? undefined : `Published at ${incident.published_at}`}
             />
           </td>
+          <td>
+            <StatusDot word={diagnosisWord(incident.diagnosis)} attribute="data-diagnosis" value={diagnosisWord(incident.diagnosis)} />
+          </td>
         </tr>
       ))}
     </>
@@ -87,7 +105,7 @@ function SkeletonRows() {
     <>
       {[0, 1, 2, 3, 4].map((row) => (
         <tr key={row} data-skeleton-row="" aria-hidden="true">
-          {[0, 1, 2, 3, 4, 5, 6].map((cell) => (
+          {[0, 1, 2, 3, 4, 5, 6, 7].map((cell) => (
             <td key={cell}>
               <span className="skeleton" />
             </td>
@@ -145,6 +163,7 @@ export function IncidentList({ state }: { state: IncidentListState }) {
                 <th scope="col">Version</th>
                 <th scope="col">Detected (UTC)</th>
                 <th scope="col">Publication</th>
+                <th scope="col">Diagnosis</th>
               </tr>
             </thead>
             <tbody>
